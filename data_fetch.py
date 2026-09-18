@@ -1,14 +1,21 @@
 """
-Fetches recent gold price candles from several providers, so the bot keeps
-working if any single one is down, rate-limited, or blocks requests coming
-from a cloud host's shared IP (a real risk once we're polling every few
-minutes instead of every 30 - see CHECK_INTERVAL_MINUTES in config.py).
+Fetches recent price candles for a configured instrument (gold, Tech100/
+Nasdaq-100, ...) from several providers, so the bot keeps working if any
+single one is down, rate-limited, or blocks requests coming from a cloud
+host's shared IP (a real risk once we're polling every few minutes instead
+of every 30 - see CHECK_INTERVAL_MINUTES in config.py).
 
 Order of providers, each one free and needing no paid plan:
-  1. Yahoo Finance, primary ticker (spot gold XAUUSD=X)
-  2. Yahoo Finance, fallback ticker (GC=F, Comex futures)
+  1. Yahoo Finance, primary ticker
+  2. Yahoo Finance, fallback ticker
   3. Twelve Data (only used if TWELVEDATA_API_KEY is set)
   4. stooq.com daily candles (last resort, coarser)
+
+Each instrument (see config.INSTRUMENTS) carries its own ticker/symbol for
+every provider, since a single symbol rarely exists identically across all
+of them (e.g. gold is "XAUUSD=X" on Yahoo but "XAU/USD" on Twelve Data; the
+Nasdaq-100 is tracked via futures "NQ=F" on Yahoo but the ETF "QQQ" on
+Twelve Data, which doesn't cover futures on its free plan).
 """
 import io
 import logging
@@ -38,12 +45,12 @@ def _fetch_yfinance(ticker: str, period: str, interval: str) -> pd.DataFrame:
     return df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
 
 
-def _fetch_twelvedata(interval: str, outputsize: int = 500) -> pd.DataFrame:
-    if not config.TWELVEDATA_API_KEY:
+def _fetch_twelvedata(symbol: str, interval: str, outputsize: int = 500) -> pd.DataFrame:
+    if not config.TWELVEDATA_API_KEY or not symbol:
         return pd.DataFrame()
     td_interval = _TWELVEDATA_INTERVAL.get(interval, "15min")
     params = {
-        "symbol": config.TWELVEDATA_SYMBOL,
+        "symbol": symbol,
         "interval": td_interval,
         "outputsize": outputsize,
         "apikey": config.TWELVEDATA_API_KEY,
@@ -67,7 +74,7 @@ def _fetch_twelvedata(interval: str, outputsize: int = 500) -> pd.DataFrame:
     return df[["Open", "High", "Low", "Close", "Volume"]]
 
 
-def _fetch_stooq(symbol: str = "xauusd") -> pd.DataFrame:
+def _fetch_stooq(symbol: str) -> pd.DataFrame:
     url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
@@ -79,9 +86,11 @@ def _fetch_stooq(symbol: str = "xauusd") -> pd.DataFrame:
     return df[["Open", "High", "Low", "Close", "Volume"]] if "Volume" in df.columns else df.assign(Volume=0)
 
 
-def get_candles(interval: str = None, period: str = "60d") -> pd.DataFrame:
+def get_candles(instrument: dict = None, interval: str = None, period: str = "60d") -> pd.DataFrame:
     """
-    Returns an OHLCV DataFrame indexed by timestamp, newest last.
+    Returns an OHLCV DataFrame indexed by timestamp, newest last, for the
+    given instrument (a dict from config.INSTRUMENTS - defaults to the
+    first configured instrument, gold, if omitted for backward compat).
     Tries every configured provider and returns the first one that
     succeeds. Raises RuntimeError only if every source fails.
 
@@ -92,29 +101,33 @@ def get_candles(interval: str = None, period: str = "60d") -> pd.DataFrame:
     in the logs) on every single check. Without a Twelve Data key, Yahoo
     is tried first since it's the only free-without-a-key option.
     """
+    instrument = instrument or config.INSTRUMENTS[0]
     interval = interval or config.CANDLE_INTERVAL
 
     def _try_yahoo():
-        for ticker in (config.GOLD_TICKER, config.GOLD_TICKER_FALLBACK):
+        for ticker in (instrument["yahoo_ticker"], instrument["yahoo_fallback"]):
+            if not ticker:
+                continue
             try:
                 df = _fetch_yfinance(ticker, period=period, interval=interval)
                 if not df.empty:
-                    log.info("Fetched %d candles from Yahoo Finance (%s, %s)", len(df), ticker, interval)
+                    log.info("Fetched %d candles from Yahoo Finance (%s, %s, %s)", len(df), instrument["key"], ticker, interval)
                     return df
             except Exception as exc:  # noqa: BLE001
-                log.warning("Yahoo Finance fetch failed for %s: %s", ticker, exc)
+                log.warning("Yahoo Finance fetch failed for %s (%s): %s", instrument["key"], ticker, exc)
         return pd.DataFrame()
 
     def _try_twelvedata():
-        if not config.TWELVEDATA_API_KEY:
+        symbol = instrument.get("twelvedata_symbol")
+        if not config.TWELVEDATA_API_KEY or not symbol:
             return pd.DataFrame()
         try:
-            df = _fetch_twelvedata(interval)
+            df = _fetch_twelvedata(symbol, interval)
             if not df.empty:
-                log.info("Fetched %d candles from Twelve Data (%s, %s)", len(df), config.TWELVEDATA_SYMBOL, interval)
+                log.info("Fetched %d candles from Twelve Data (%s, %s, %s)", len(df), instrument["key"], symbol, interval)
                 return df
         except Exception as exc:  # noqa: BLE001
-            log.warning("Twelve Data fetch failed: %s", exc)
+            log.warning("Twelve Data fetch failed for %s: %s", instrument["key"], exc)
         return pd.DataFrame()
 
     providers = [_try_twelvedata, _try_yahoo] if config.TWELVEDATA_API_KEY else [_try_yahoo, _try_twelvedata]
@@ -124,16 +137,20 @@ def get_candles(interval: str = None, period: str = "60d") -> pd.DataFrame:
             return df
 
     # Last resort: daily candles from stooq (coarser, but keeps the bot alive)
-    try:
-        df = _fetch_stooq()
-        if not df.empty:
-            log.info("Fetched %d daily candles from stooq.com (fallback)", len(df))
-            return df
-    except Exception as exc:  # noqa: BLE001
-        log.warning("stooq.com fallback fetch failed: %s", exc)
+    symbol = instrument.get("stooq_symbol")
+    if symbol:
+        try:
+            df = _fetch_stooq(symbol)
+            if not df.empty:
+                log.info("Fetched %d daily candles from stooq.com (%s, fallback)", len(df), instrument["key"])
+                return df
+        except Exception as exc:  # noqa: BLE001
+            log.warning("stooq.com fallback fetch failed for %s: %s", instrument["key"], exc)
 
-    raise RuntimeError("Could not fetch gold price data from any source (Yahoo Finance, Twelve Data, stooq.com)")
+    raise RuntimeError(
+        f"Could not fetch {instrument['key']} price data from any source (Yahoo Finance, Twelve Data, stooq.com)"
+    )
 
 
-def get_daily_candles(period: str = "1y") -> pd.DataFrame:
-    return get_candles(interval="60m", period=period)
+def get_daily_candles(instrument: dict = None, period: str = "1y") -> pd.DataFrame:
+    return get_candles(instrument, interval="60m", period=period)

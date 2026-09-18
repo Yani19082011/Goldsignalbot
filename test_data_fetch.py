@@ -9,6 +9,10 @@ import pandas as pd
 import config
 import data_fetch
 
+GOLD = config.INSTRUMENTS[0]
+assert GOLD["key"] == "GOLD"
+TECH100 = next((i for i in config.INSTRUMENTS if i["key"] == "TECH100"), None)
+
 
 def _sample_df(n=60, start=2000.0):
     idx = pd.date_range("2026-01-01", periods=n, freq="15min")
@@ -24,15 +28,15 @@ def test_falls_back_to_second_yahoo_ticker_when_first_is_empty():
 
     def fake_fetch_yfinance(ticker, period, interval):
         calls.append(ticker)
-        if ticker == config.GOLD_TICKER:
+        if ticker == GOLD["yahoo_ticker"]:
             return pd.DataFrame()  # simulate empty/blocked response
         return _sample_df()
 
     orig = data_fetch._fetch_yfinance
     data_fetch._fetch_yfinance = fake_fetch_yfinance
     try:
-        df = data_fetch.get_candles(interval="15m")
-        assert calls == [config.GOLD_TICKER, config.GOLD_TICKER_FALLBACK]
+        df = data_fetch.get_candles(GOLD, interval="15m")
+        assert calls == [GOLD["yahoo_ticker"], GOLD["yahoo_fallback"]]
         assert not df.empty
         print(f"[yahoo-fallback] tried {calls}, got {len(df)} rows - OK")
     finally:
@@ -43,7 +47,7 @@ def test_falls_back_to_twelvedata_when_yahoo_fails_entirely():
     def fake_fetch_yfinance(ticker, period, interval):
         raise RuntimeError("simulated Yahoo outage")
 
-    def fake_fetch_twelvedata(interval, outputsize=500):
+    def fake_fetch_twelvedata(symbol, interval, outputsize=500):
         return _sample_df()
 
     orig_yf = data_fetch._fetch_yfinance
@@ -53,7 +57,7 @@ def test_falls_back_to_twelvedata_when_yahoo_fails_entirely():
     data_fetch._fetch_twelvedata = fake_fetch_twelvedata
     config.TWELVEDATA_API_KEY = "fake-key-for-test"
     try:
-        df = data_fetch.get_candles(interval="15m")
+        df = data_fetch.get_candles(GOLD, interval="15m")
         assert not df.empty
         print("[twelvedata-fallback] Yahoo down, Twelve Data served data - OK")
     finally:
@@ -66,7 +70,7 @@ def test_twelvedata_is_skipped_without_an_api_key():
     def fake_fetch_yfinance(ticker, period, interval):
         raise RuntimeError("simulated Yahoo outage")
 
-    def fake_fetch_stooq(symbol="xauusd"):
+    def fake_fetch_stooq(symbol):
         return _sample_df(n=30)
 
     orig_yf = data_fetch._fetch_yfinance
@@ -76,7 +80,7 @@ def test_twelvedata_is_skipped_without_an_api_key():
     data_fetch._fetch_stooq = fake_fetch_stooq
     config.TWELVEDATA_API_KEY = ""  # not configured
     try:
-        df = data_fetch.get_candles(interval="15m")
+        df = data_fetch.get_candles(GOLD, interval="15m")
         assert not df.empty, "should still fall through to stooq"
         print("[no-twelvedata-key] correctly skipped straight to stooq - OK")
     finally:
@@ -102,7 +106,7 @@ def test_raises_only_when_every_provider_fails():
     config.TWELVEDATA_API_KEY = "fake-key"
     try:
         try:
-            data_fetch.get_candles(interval="15m")
+            data_fetch.get_candles(GOLD, interval="15m")
             raise AssertionError("expected RuntimeError when every provider fails")
         except RuntimeError as e:
             assert "any source" in str(e)
@@ -142,8 +146,9 @@ def test_twelvedata_interval_mapping_and_parsing():
     requests.get = fake_get
     config.TWELVEDATA_API_KEY = "fake-key"
     try:
-        df = data_fetch._fetch_twelvedata("15m")
+        df = data_fetch._fetch_twelvedata(GOLD["twelvedata_symbol"], "15m")
         assert captured["params"]["interval"] == "15min"
+        assert captured["params"]["symbol"] == GOLD["twelvedata_symbol"]
         assert list(df.columns) == ["Open", "High", "Low", "Close", "Volume"]
         assert len(df) == 2
         assert df["Close"].iloc[-1] == 2001.5
@@ -153,6 +158,28 @@ def test_twelvedata_interval_mapping_and_parsing():
         config.TWELVEDATA_API_KEY = orig_key
 
 
+def test_tech100_instrument_is_configured_with_its_own_symbols():
+    assert TECH100 is not None, "TECH100 should be enabled by default (ENABLE_TECH100 defaults to true)"
+    assert TECH100["yahoo_ticker"] != GOLD["yahoo_ticker"]
+    assert TECH100["twelvedata_symbol"] != GOLD["twelvedata_symbol"]
+
+    calls = []
+
+    def fake_fetch_yfinance(ticker, period, interval):
+        calls.append(ticker)
+        return _sample_df(start=20000.0)
+
+    orig = data_fetch._fetch_yfinance
+    data_fetch._fetch_yfinance = fake_fetch_yfinance
+    try:
+        df = data_fetch.get_candles(TECH100, interval="15m")
+        assert calls == [TECH100["yahoo_ticker"]], f"expected Tech100's own ticker, got {calls}"
+        assert not df.empty
+        print(f"[tech100-instrument] fetched with {calls[0]} (not gold's ticker) - OK")
+    finally:
+        data_fetch._fetch_yfinance = orig
+
+
 if __name__ == "__main__":
     tests = [
         test_falls_back_to_second_yahoo_ticker_when_first_is_empty,
@@ -160,6 +187,7 @@ if __name__ == "__main__":
         test_twelvedata_is_skipped_without_an_api_key,
         test_raises_only_when_every_provider_fails,
         test_twelvedata_interval_mapping_and_parsing,
+        test_tech100_instrument_is_configured_with_its_own_symbols,
     ]
     failures = 0
     for t in tests:
