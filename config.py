@@ -79,10 +79,12 @@ REALERT_COOLDOWN_HOURS = _float("REALERT_COOLDOWN_HOURS", 6)
 
 # --- Email (Resend API) ------------------------------------------------------
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-# Resend's shared sandbox sender. Works without verifying your own domain,
-# but Resend will only actually deliver to the email address tied to your
-# Resend account until you verify a domain at resend.com/domains.
-ALERT_FROM_EMAIL = os.environ.get("ALERT_FROM_EMAIL", "GoldSignalBot <onboarding@resend.com>")
+# Resend's shared sandbox sender domain is "resend.dev" (not "resend.com" -
+# that one requires your own verified domain and will 403). Works without
+# verifying your own domain, but Resend will only actually deliver to the
+# email address tied to your Resend account until you verify a domain at
+# resend.com/domains.
+ALERT_FROM_EMAIL = os.environ.get("ALERT_FROM_EMAIL", "GoldSignalBot <onboarding@resend.dev>")
 ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "yani.kolev2011@gmail.com")
 
 # --- Web server ---------------------------------------------------------
