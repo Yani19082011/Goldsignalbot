@@ -180,22 +180,63 @@ def test_tech100_instrument_is_configured_with_its_own_symbols():
         data_fetch._fetch_yfinance = orig
 
 
-def test_wrong_scale_reading_is_rejected_and_falls_through():
-    # Regression test for the real 18.09 incident: Twelve Data/QQQ returned
-    # real, well-formed candles (~$718) while Yahoo Finance was down - but
-    # $718 is nowhere near a plausible Nasdaq-100/TECH100 level (~$29,800
-    # that day). The fetch must reject that reading and fall through to the
-    # next provider instead of ever returning it as if it were valid.
+def test_tech100_qqq_reading_gets_scaled_to_index_level():
+    # Regression test for the REAL incident, round 1 (18.09): Twelve
+    # Data/QQQ returns real, well-formed candles (~$718, an ETF share
+    # price) while Yahoo Finance is down (common from Render's IP) - the
+    # fetch must now scale that up to the actual Nasdaq-100 index/CFD level
+    # (~$29,800) via TECH100_ETF_SCALE, not reject it and not emit it raw.
     assert TECH100 is not None
+    assert TECH100["twelvedata_symbol"] == "QQQ"
+    assert TECH100.get("twelvedata_scale", 1.0) > 1.0
 
     def fake_fetch_yfinance(ticker, period, interval):
         raise RuntimeError("simulated Yahoo outage (matches the real incident)")
 
     def fake_fetch_twelvedata(symbol, interval, outputsize=500):
-        return _sample_df(start=718.0)  # QQQ-scale, wrong for TECH100
+        return _sample_df(n=1, start=718.0)  # raw QQQ ETF share price
+
+    orig_yf, orig_td, orig_key = (
+        data_fetch._fetch_yfinance, data_fetch._fetch_twelvedata, config.TWELVEDATA_API_KEY,
+    )
+    data_fetch._fetch_yfinance = fake_fetch_yfinance
+    data_fetch._fetch_twelvedata = fake_fetch_twelvedata
+    config.TWELVEDATA_API_KEY = "fake-key"
+    try:
+        df = data_fetch.get_candles(TECH100, interval="15m")
+        assert not df.empty
+        last_close = float(df["Close"].iloc[-1])
+        expected = 718.0 * TECH100["twelvedata_scale"]
+        assert abs(last_close - expected) < 1.0, f"expected ~{expected:.0f} (scaled), got {last_close:.0f}"
+        assert last_close > TECH100["sanity_min"]
+        print(f"[etf-scale] raw QQQ reading (718) scaled to index level ({last_close:.0f}) - OK")
+    finally:
+        data_fetch._fetch_yfinance = orig_yf
+        data_fetch._fetch_twelvedata = orig_td
+        config.TWELVEDATA_API_KEY = orig_key
+
+
+def test_sanity_check_still_guards_an_unscaled_wrong_reading():
+    # The sanity check is a second, independent safety net - even if a
+    # future config change reintroduces an unscaled/mis-scaled provider
+    # (e.g. someone sets a symbol's scale factor back to 1.0 by mistake),
+    # a reading nowhere near the instrument's plausible range must still be
+    # rejected and the fetch must fall through to the next provider,
+    # instead of ever emailing a signal on the wrong price scale.
+    assert TECH100 is not None
+
+    def fake_fetch_yfinance(ticker, period, interval):
+        raise RuntimeError("simulated Yahoo outage")
+
+    def fake_fetch_twelvedata(symbol, interval, outputsize=500):
+        return _sample_df(n=1, start=718.0)  # unscaled QQQ-level reading
 
     def fake_fetch_stooq(symbol):
-        return _sample_df(start=29800.0)  # correct index/CFD scale
+        return _sample_df(n=1, start=29800.0)  # correct index/CFD scale, already
+
+    instrument = dict(TECH100)
+    instrument["twelvedata_scale"] = 1.0  # simulate the misconfiguration
+    instrument["stooq_scale"] = 1.0  # this fallback's fake data is already correctly scaled
 
     orig_yf, orig_td, orig_stooq, orig_key = (
         data_fetch._fetch_yfinance, data_fetch._fetch_twelvedata,
@@ -206,13 +247,13 @@ def test_wrong_scale_reading_is_rejected_and_falls_through():
     data_fetch._fetch_stooq = fake_fetch_stooq
     config.TWELVEDATA_API_KEY = "fake-key"
     try:
-        df = data_fetch.get_candles(TECH100, interval="15m")
+        df = data_fetch.get_candles(instrument, interval="15m")
         assert not df.empty
         last_close = float(df["Close"].iloc[-1])
         assert last_close > 8000, (
-            f"wrong-scale QQQ-like reading ({last_close}) leaked through instead of being rejected"
+            f"unscaled QQQ-like reading ({last_close}) leaked through instead of being rejected"
         )
-        print(f"[sanity-check] wrong-scale reading (718) correctly rejected, fell through to stooq ({last_close:.0f}) - OK")
+        print(f"[sanity-check] unscaled reading (718) correctly rejected, fell through to stooq ({last_close:.0f}) - OK")
     finally:
         data_fetch._fetch_yfinance = orig_yf
         data_fetch._fetch_twelvedata = orig_td
@@ -228,7 +269,8 @@ if __name__ == "__main__":
         test_raises_only_when_every_provider_fails,
         test_twelvedata_interval_mapping_and_parsing,
         test_tech100_instrument_is_configured_with_its_own_symbols,
-        test_wrong_scale_reading_is_rejected_and_falls_through,
+        test_tech100_qqq_reading_gets_scaled_to_index_level,
+        test_sanity_check_still_guards_an_unscaled_wrong_reading,
     ]
     failures = 0
     for t in tests:
