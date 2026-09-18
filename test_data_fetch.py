@@ -180,6 +180,46 @@ def test_tech100_instrument_is_configured_with_its_own_symbols():
         data_fetch._fetch_yfinance = orig
 
 
+def test_wrong_scale_reading_is_rejected_and_falls_through():
+    # Regression test for the real 18.09 incident: Twelve Data/QQQ returned
+    # real, well-formed candles (~$718) while Yahoo Finance was down - but
+    # $718 is nowhere near a plausible Nasdaq-100/TECH100 level (~$29,800
+    # that day). The fetch must reject that reading and fall through to the
+    # next provider instead of ever returning it as if it were valid.
+    assert TECH100 is not None
+
+    def fake_fetch_yfinance(ticker, period, interval):
+        raise RuntimeError("simulated Yahoo outage (matches the real incident)")
+
+    def fake_fetch_twelvedata(symbol, interval, outputsize=500):
+        return _sample_df(start=718.0)  # QQQ-scale, wrong for TECH100
+
+    def fake_fetch_stooq(symbol):
+        return _sample_df(start=29800.0)  # correct index/CFD scale
+
+    orig_yf, orig_td, orig_stooq, orig_key = (
+        data_fetch._fetch_yfinance, data_fetch._fetch_twelvedata,
+        data_fetch._fetch_stooq, config.TWELVEDATA_API_KEY,
+    )
+    data_fetch._fetch_yfinance = fake_fetch_yfinance
+    data_fetch._fetch_twelvedata = fake_fetch_twelvedata
+    data_fetch._fetch_stooq = fake_fetch_stooq
+    config.TWELVEDATA_API_KEY = "fake-key"
+    try:
+        df = data_fetch.get_candles(TECH100, interval="15m")
+        assert not df.empty
+        last_close = float(df["Close"].iloc[-1])
+        assert last_close > 8000, (
+            f"wrong-scale QQQ-like reading ({last_close}) leaked through instead of being rejected"
+        )
+        print(f"[sanity-check] wrong-scale reading (718) correctly rejected, fell through to stooq ({last_close:.0f}) - OK")
+    finally:
+        data_fetch._fetch_yfinance = orig_yf
+        data_fetch._fetch_twelvedata = orig_td
+        data_fetch._fetch_stooq = orig_stooq
+        config.TWELVEDATA_API_KEY = orig_key
+
+
 if __name__ == "__main__":
     tests = [
         test_falls_back_to_second_yahoo_ticker_when_first_is_empty,
@@ -188,6 +228,7 @@ if __name__ == "__main__":
         test_raises_only_when_every_provider_fails,
         test_twelvedata_interval_mapping_and_parsing,
         test_tech100_instrument_is_configured_with_its_own_symbols,
+        test_wrong_scale_reading_is_rejected_and_falls_through,
     ]
     failures = 0
     for t in tests:

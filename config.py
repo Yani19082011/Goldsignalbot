@@ -48,16 +48,37 @@ GOLD_STOOQ_SYMBOL = os.environ.get("GOLD_STOOQ_SYMBOL", "xauusd")
 # USA Tech 100 / Nasdaq-100 (the "TECH100" CFD most brokers, incl. eToro,
 # offer). Tracked via Nasdaq-100 futures (NQ=F) primarily - futures trade
 # near-24h like the CFD does, unlike the ^NDX cash index which only moves
-# during US market hours. QQQ (the Nasdaq-100 ETF) is used for Twelve Data
-# since Twelve Data's free plan covers US-listed ETFs/stocks, not futures.
+# during US market hours.
+#
+# BUG FOUND 18.09 (confirmed by the user's own screenshots): the Twelve Data
+# symbol here used to default to "QQQ" (the Nasdaq-100 ETF). Yahoo Finance
+# fails very often from Render's cloud IP (the same known issue as gold),
+# so the bot was silently falling back to Twelve Data/QQQ most of the time -
+# but QQQ's SHARE PRICE (~$718 that day) is on a totally different scale
+# than the actual Nasdaq-100 index/CFD level (~$29,800 that day, ~41x
+# higher) because of QQQ's 2011 share split. The email showed a real,
+# correctly-computed signal, just on the wrong price scale entirely - stop
+# loss/take profit numbers were meaningless next to the real chart. Fixed
+# two ways: (1) Twelve Data now requests the actual index ("NDX") instead
+# of the ETF, so it's the right scale when it works; (2) get_candles() below
+# now sanity-checks the fetched price against each instrument's expected
+# range and rejects/skips a provider whose reading is wildly out of scale,
+# instead of ever emailing a number that doesn't match the real market -
+# see "sanity_min"/"sanity_max" below and _passes_sanity_check() in
+# data_fetch.py. This second part guards against this whole class of bug
+# (wrong symbol, wrong currency, decimal error, ...) for both instruments,
+# not just this one incident.
 ENABLE_TECH100 = _bool("ENABLE_TECH100", True)
 TECH100_TICKER = os.environ.get("TECH100_TICKER", "NQ=F")
 TECH100_TICKER_FALLBACK = os.environ.get("TECH100_TICKER_FALLBACK", "^NDX")
-TECH100_TWELVEDATA_SYMBOL = os.environ.get("TECH100_TWELVEDATA_SYMBOL", "QQQ")
-TECH100_STOOQ_SYMBOL = os.environ.get("TECH100_STOOQ_SYMBOL", "qqq.us")
+TECH100_TWELVEDATA_SYMBOL = os.environ.get("TECH100_TWELVEDATA_SYMBOL", "NDX")
+TECH100_STOOQ_SYMBOL = os.environ.get("TECH100_STOOQ_SYMBOL", "^ndx")
 
 # Every instrument the background loop checks each cycle. Set ENABLE_TECH100
 # to false in Render's Environment tab to go back to gold-only.
+# sanity_min/sanity_max are a loose plausibility range (generous on purpose -
+# not a precision check, just "is this even remotely the right instrument
+# and scale") - see _passes_sanity_check() in data_fetch.py.
 INSTRUMENTS = [
     {
         "key": "GOLD",
@@ -67,6 +88,8 @@ INSTRUMENTS = [
         "yahoo_fallback": GOLD_TICKER_FALLBACK,
         "twelvedata_symbol": GOLD_TWELVEDATA_SYMBOL,
         "stooq_symbol": GOLD_STOOQ_SYMBOL,
+        "sanity_min": _float("GOLD_SANITY_MIN", 800.0),
+        "sanity_max": _float("GOLD_SANITY_MAX", 8000.0),
     },
 ]
 if ENABLE_TECH100:
@@ -78,6 +101,8 @@ if ENABLE_TECH100:
         "yahoo_fallback": TECH100_TICKER_FALLBACK,
         "twelvedata_symbol": TECH100_TWELVEDATA_SYMBOL,
         "stooq_symbol": TECH100_STOOQ_SYMBOL,
+        "sanity_min": _float("TECH100_SANITY_MIN", 8000.0),
+        "sanity_max": _float("TECH100_SANITY_MAX", 60000.0),
     })
 
 # Candle size used for the indicators. Shorter = faster-reacting but noisier.
@@ -87,10 +112,23 @@ CANDLE_INTERVAL = os.environ.get("CANDLE_INTERVAL", "15m")
 # --- Scan schedule -----------------------------------------------------------
 # How often (minutes) the background loop re-checks the market. Checking
 # much more often than the candle size above just re-reads the same
-# still-forming candle - 5 min against 15m candles means you hear about a
-# new signal within 5 minutes of it confirming, without hammering the data
-# providers on every single check.
-CHECK_INTERVAL_MINUTES = _int("CHECK_INTERVAL_MINUTES", 5)
+# still-forming candle.
+CHECK_INTERVAL_MINUTES = _int("CHECK_INTERVAL_MINUTES", 15)
+
+# --- Active window -----------------------------------------------------------
+# By user request (18.09): only check/alert Monday-Friday, 07:30-23:00
+# (Europe/Sofia) - no weekend or late-night emails. Outside this window the
+# background loop does nothing (no provider calls, no emails) and just
+# waits for the next tick. Set ACTIVE_DAYS_ONLY=false or widen the hours
+# below (e.g. back to 00:00-23:59) to go back to round-the-clock checking -
+# gold/forex markets do trade nearly 24/5, this window is purely about when
+# YOU want to be alerted, not when the market is open.
+ACTIVE_DAYS_ONLY = _bool("ACTIVE_DAYS_ONLY", True)  # Monday-Friday only
+ACTIVE_HOURS_TZ = os.environ.get("ACTIVE_HOURS_TZ", "Europe/Sofia")
+ACTIVE_START_HOUR = _int("ACTIVE_START_HOUR", 7)
+ACTIVE_START_MINUTE = _int("ACTIVE_START_MINUTE", 30)
+ACTIVE_END_HOUR = _int("ACTIVE_END_HOUR", 23)
+ACTIVE_END_MINUTE = _int("ACTIVE_END_MINUTE", 0)
 
 # --- Confluence strategy -----------------------------------------------------
 # Number of the 5 confluence conditions (see signals.py) that must agree

@@ -13,6 +13,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify
 
@@ -44,6 +45,24 @@ state = {
         for inst in config.INSTRUMENTS
     },
 }
+
+
+def _within_active_window() -> bool:
+    """By user request (18.09): Monday-Friday only, config.ACTIVE_START_*
+    to config.ACTIVE_END_* in config.ACTIVE_HOURS_TZ. If the timezone data
+    is somehow unavailable, fail open (check anyway) rather than going
+    silent because of a bug here."""
+    try:
+        tz = ZoneInfo(config.ACTIVE_HOURS_TZ)
+    except Exception:
+        log.warning("ACTIVE_HOURS_TZ (%s) invalid - skipping the active-window check.", config.ACTIVE_HOURS_TZ)
+        return True
+    now_local = datetime.now(tz)
+    if config.ACTIVE_DAYS_ONLY and now_local.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        return False
+    start = now_local.replace(hour=config.ACTIVE_START_HOUR, minute=config.ACTIVE_START_MINUTE, second=0, microsecond=0)
+    end = now_local.replace(hour=config.ACTIVE_END_HOUR, minute=config.ACTIVE_END_MINUTE, second=0, microsecond=0)
+    return start <= now_local <= end
 
 
 def _should_send(inst_state: dict, direction: str) -> bool:
@@ -89,6 +108,14 @@ def check_instrument(instrument: dict):
 
 
 def check_once():
+    if not _within_active_window():
+        log.info(
+            "Outside the active window (%02d:%02d-%02d:%02d %s, Mon-Fri only=%s) - skipping this cycle.",
+            config.ACTIVE_START_HOUR, config.ACTIVE_START_MINUTE,
+            config.ACTIVE_END_HOUR, config.ACTIVE_END_MINUTE,
+            config.ACTIVE_HOURS_TZ, config.ACTIVE_DAYS_ONLY,
+        )
+        return
     for instrument in config.INSTRUMENTS:
         check_instrument(instrument)
 
@@ -112,11 +139,19 @@ def health():
     })
 
 
+def _check_all_instruments_now():
+    """Same as check_once() but ignores the active window - a manual
+    /check-now hit is an explicit request to test right now, weekend or
+    3am included."""
+    for instrument in config.INSTRUMENTS:
+        check_instrument(instrument)
+
+
 @app.route("/check-now")
 def check_now():
-    """Manually trigger an immediate check of every instrument (useful for
-    testing after deploy)."""
-    threading.Thread(target=check_once, daemon=True).start()
+    """Manually trigger an immediate check of every instrument, regardless
+    of the active window (useful for testing after deploy, any time)."""
+    threading.Thread(target=_check_all_instruments_now, daemon=True).start()
     return jsonify({"status": "check triggered, see /"})
 
 

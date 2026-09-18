@@ -86,6 +86,34 @@ def _fetch_stooq(symbol: str) -> pd.DataFrame:
     return df[["Open", "High", "Low", "Close", "Volume"]] if "Volume" in df.columns else df.assign(Volume=0)
 
 
+def _passes_sanity_check(df: pd.DataFrame, instrument: dict, source: str) -> bool:
+    """Loose plausibility check on the latest close price - catches the
+    whole class of bug where a provider returns real, well-formed data for
+    the WRONG thing (wrong symbol, an ETF instead of the index it tracks,
+    a currency mismatch, a stale/decimal-shifted reading, ...) and the bot
+    would otherwise happily compute a confluence signal and email it,
+    looking completely legitimate while being off by an order of magnitude.
+    Confirmed real case (18.09): Twelve Data's "QQQ" (the Nasdaq-100 ETF,
+    ~$718) got used as a stand-in for the Nasdaq-100 index/CFD (~$29,800) -
+    see the long comment in config.py. sanity_min/sanity_max are a generous
+    range, not a precision check - the goal is only to reject "obviously
+    the wrong instrument," not to validate the exact price.
+    """
+    sanity_min = instrument.get("sanity_min")
+    sanity_max = instrument.get("sanity_max")
+    if sanity_min is None or sanity_max is None or df.empty:
+        return True
+    last_close = float(df["Close"].iloc[-1])
+    if sanity_min <= last_close <= sanity_max:
+        return True
+    log.warning(
+        "%s: %s returned a price (%.2f) outside the expected range [%.2f, %.2f] for this "
+        "instrument - rejecting this reading as wrong-instrument/wrong-scale, trying the next source.",
+        instrument["key"], source, last_close, sanity_min, sanity_max,
+    )
+    return False
+
+
 def get_candles(instrument: dict = None, interval: str = None, period: str = "60d") -> pd.DataFrame:
     """
     Returns an OHLCV DataFrame indexed by timestamp, newest last, for the
@@ -110,7 +138,7 @@ def get_candles(instrument: dict = None, interval: str = None, period: str = "60
                 continue
             try:
                 df = _fetch_yfinance(ticker, period=period, interval=interval)
-                if not df.empty:
+                if not df.empty and _passes_sanity_check(df, instrument, f"Yahoo Finance ({ticker})"):
                     log.info("Fetched %d candles from Yahoo Finance (%s, %s, %s)", len(df), instrument["key"], ticker, interval)
                     return df
             except Exception as exc:  # noqa: BLE001
@@ -123,7 +151,7 @@ def get_candles(instrument: dict = None, interval: str = None, period: str = "60
             return pd.DataFrame()
         try:
             df = _fetch_twelvedata(symbol, interval)
-            if not df.empty:
+            if not df.empty and _passes_sanity_check(df, instrument, f"Twelve Data ({symbol})"):
                 log.info("Fetched %d candles from Twelve Data (%s, %s, %s)", len(df), instrument["key"], symbol, interval)
                 return df
         except Exception as exc:  # noqa: BLE001
@@ -141,7 +169,7 @@ def get_candles(instrument: dict = None, interval: str = None, period: str = "60
     if symbol:
         try:
             df = _fetch_stooq(symbol)
-            if not df.empty:
+            if not df.empty and _passes_sanity_check(df, instrument, f"stooq.com ({symbol})"):
                 log.info("Fetched %d daily candles from stooq.com (%s, fallback)", len(df), instrument["key"])
                 return df
         except Exception as exc:  # noqa: BLE001
