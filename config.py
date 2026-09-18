@@ -146,9 +146,17 @@ ACTIVE_END_HOUR = _int("ACTIVE_END_HOUR", 23)
 ACTIVE_END_MINUTE = _int("ACTIVE_END_MINUTE", 0)
 
 # --- Confluence strategy -----------------------------------------------------
-# Number of the 5 confluence conditions (see signals.py) that must agree
-# before an alert is sent. 4 or 5 = high conviction, 3 = more alerts/noisier.
+# Number of the 6 confluence conditions (see signals.py, candlesticks.py)
+# that must agree before an alert is sent. Higher = fewer, higher-conviction
+# alerts; lower = more alerts/noisier.
 CONFLUENCE_THRESHOLD = _int("CONFLUENCE_THRESHOLD", 3)
+
+# By user request (18.09): only email BUY signals, never SELL. SELL signals
+# are still computed and logged/visible on "/" (useful context - "the bot
+# went quiet" is very different from "the bot sees a SELL setup but isn't
+# telling you"), just never emailed. Set ALERT_ONLY_BUY=false to go back to
+# getting both directions.
+ALERT_ONLY_BUY = _bool("ALERT_ONLY_BUY", True)
 
 EMA_FAST = _int("EMA_FAST", 9)
 EMA_MID = _int("EMA_MID", 21)

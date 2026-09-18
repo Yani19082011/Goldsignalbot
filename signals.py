@@ -1,12 +1,19 @@
 """
-Confluence-based buy/sell signal logic for gold.
+Confluence-based buy/sell signal logic.
 
-Five independent technical conditions are checked on hourly candles.
-Each one votes BUY, SELL, or neutral. When enough of them agree
-(CONFLUENCE_THRESHOLD out of 5), that's a signal.
+Six independent conditions are checked per instrument's candles. Each one
+votes BUY, SELL, or neutral. When enough of them agree (CONFLUENCE_THRESHOLD
+out of 6), that's a signal:
+  1) EMA9 vs EMA21 trend/crossover
+  2) Price vs EMA50 (broader trend filter)
+  3) RSI(14) leaving oversold/overbought
+  4) MACD histogram momentum/crossover
+  5) Bollinger Band support/resistance test
+  6) Candlestick pattern (hammer, engulfing, morning/evening star, ... -
+     see candlesticks.py; added 18.09 by user request)
 
 This is a rule-based technical indicator tool, not financial advice.
-Gold can move on macro/news events (Fed decisions, geopolitics, USD
+Markets move on macro/news events (Fed decisions, geopolitics, USD
 strength) that no technical indicator sees coming - use this as one
 input among several, not a substitute for your own judgement.
 """
@@ -15,6 +22,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+import candlesticks
 import config
 
 
@@ -123,16 +131,16 @@ class SignalResult:
 
 def evaluate(df: pd.DataFrame) -> SignalResult:
     """
-    Looks at the most recent two fully-formed candles and scores 5
-    confluence conditions for BUY and for SELL. Returns whichever
-    direction (if any) crosses the configured threshold. Ties or a
-    below-threshold score return direction "NONE".
+    Looks at the most recent candles and scores 6 confluence conditions
+    for BUY and for SELL. Returns whichever direction (if any) crosses the
+    configured threshold. Ties or a below-threshold score return direction
+    "NONE".
     """
     d = add_indicators(df).dropna(
         subset=["ema_fast", "ema_mid", "ema_slow", "rsi", "macd_hist", "bb_lower", "atr"]
     )
     if len(d) < 3:
-        return SignalResult(direction="NONE", score=0, max_score=5, reasons=["not enough data yet"])
+        return SignalResult(direction="NONE", score=0, max_score=6, reasons=["not enough data yet"])
 
     cur = d.iloc[-1]
     prev = d.iloc[-2]
@@ -190,6 +198,16 @@ def evaluate(df: pd.DataFrame) -> SignalResult:
     if (recent["High"] >= recent["bb_upper"] * 0.998).any():
         sell_reasons.append("Цената тества горната Bollinger лента (съпротива)")
 
+    # 6) Candlestick pattern (hammer, engulfing, morning/evening star, ...) -
+    # see candlesticks.py. Multiple patterns matching at once still count as
+    # ONE condition here (same weight as the other 5), not one point per
+    # pattern, so a busy candle doesn't dominate the score.
+    bullish_patterns, bearish_patterns = candlesticks.detect_patterns(d)
+    if bullish_patterns:
+        buy_reasons.append("Свещна фигура: " + ", ".join(bullish_patterns))
+    if bearish_patterns:
+        sell_reasons.append("Свещна фигура: " + ", ".join(bearish_patterns))
+
     buy_score = len(buy_reasons)
     sell_score = len(sell_reasons)
 
@@ -205,7 +223,7 @@ def evaluate(df: pd.DataFrame) -> SignalResult:
     return SignalResult(
         direction=direction,
         score=score,
-        max_score=5,
+        max_score=6,
         reasons=reasons,
         price=float(cur["Close"]),
         atr=float(cur["atr"]),

@@ -92,10 +92,13 @@ def check_instrument(instrument: dict):
             key, result.price, result.direction, result.score, result.max_score,
         )
 
-        if result.direction in ("BUY", "SELL") and _should_send(inst_state, result.direction):
+        alertable_directions = ("BUY",) if config.ALERT_ONLY_BUY else ("BUY", "SELL")
+        if result.direction in alertable_directions and _should_send(inst_state, result.direction):
             sent = notifier.send_signal_email(result, instrument)
             if sent:
                 inst_state["last_signal_sent"][result.direction] = datetime.now(timezone.utc)
+        elif result.direction == "SELL" and config.ALERT_ONLY_BUY:
+            log.info("[%s] SELL setup seen (score=%d/%d) but ALERT_ONLY_BUY=true - not emailing.", key, result.score, result.max_score)
 
     except Exception as exc:  # noqa: BLE001
         inst_state["consecutive_errors"] += 1
