@@ -29,15 +29,31 @@ def _int(name: str, default: int) -> int:
         return default
 
 
-# --- Data source -----------------------------------------------------------
-# Yahoo Finance ticker for spot gold in USD. "GC=F" (Comex futures) is used
-# automatically as a fallback if this one returns no data.
+# --- Data sources ------------------------------------------------------------
+# Candles are fetched from several providers, in this order, so a single
+# provider being down, rate-limited, or blocking cloud IPs doesn't take the
+# bot offline:
+#   1. Yahoo Finance, primary ticker (spot gold)
+#   2. Yahoo Finance, fallback ticker (Comex futures)
+#   3. Twelve Data (only if TWELVEDATA_API_KEY is set - free key at
+#      twelvedata.com, no card required, 800 requests/day on the free plan)
+#   4. stooq.com daily candles (last resort, coarser, but keeps the bot alive)
 GOLD_TICKER = os.environ.get("GOLD_TICKER", "XAUUSD=X")
 GOLD_TICKER_FALLBACK = os.environ.get("GOLD_TICKER_FALLBACK", "GC=F")
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
+TWELVEDATA_SYMBOL = os.environ.get("TWELVEDATA_SYMBOL", "XAU/USD")
+
+# Candle size used for the indicators. Shorter = faster-reacting but noisier.
+# Yahoo/Twelve Data both support: 5m, 15m, 30m, 60m.
+CANDLE_INTERVAL = os.environ.get("CANDLE_INTERVAL", "15m")
 
 # --- Scan schedule -----------------------------------------------------------
-# How often (minutes) the background loop re-checks the market.
-CHECK_INTERVAL_MINUTES = _int("CHECK_INTERVAL_MINUTES", 30)
+# How often (minutes) the background loop re-checks the market. Checking
+# much more often than the candle size above just re-reads the same
+# still-forming candle - 5 min against 15m candles means you hear about a
+# new signal within 5 minutes of it confirming, without hammering the data
+# providers on every single check.
+CHECK_INTERVAL_MINUTES = _int("CHECK_INTERVAL_MINUTES", 5)
 
 # --- Confluence strategy -----------------------------------------------------
 # Number of the 5 confluence conditions (see signals.py) that must agree
@@ -67,7 +83,7 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 # but Resend will only actually deliver to the email address tied to your
 # Resend account until you verify a domain at resend.com/domains.
 ALERT_FROM_EMAIL = os.environ.get("ALERT_FROM_EMAIL", "GoldSignalBot <onboarding@resend.com>")
-ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "y14962461@gmail.com")
+ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "yani.kolev2011@gmail.com")
 
 # --- Web server ---------------------------------------------------------
 PORT = _int("PORT", 10000)

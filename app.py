@@ -47,7 +47,7 @@ def _should_send(direction: str) -> bool:
 
 def check_once():
     try:
-        df = data_fetch.get_candles(interval="60m", period="60d")
+        df = data_fetch.get_candles(interval=config.CANDLE_INTERVAL, period="60d")
         result = signals.evaluate(df)
 
         state["last_check"] = datetime.now(timezone.utc).isoformat()
