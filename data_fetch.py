@@ -82,21 +82,32 @@ def _fetch_stooq(symbol: str = "xauusd") -> pd.DataFrame:
 def get_candles(interval: str = None, period: str = "60d") -> pd.DataFrame:
     """
     Returns an OHLCV DataFrame indexed by timestamp, newest last.
-    Tries every configured provider in order and returns the first one that
+    Tries every configured provider and returns the first one that
     succeeds. Raises RuntimeError only if every source fails.
+
+    Order: if a Twelve Data key is configured, it's tried FIRST, ahead of
+    Yahoo Finance. In practice Yahoo Finance blocks/rate-limits requests
+    from cloud hosts (Render, AWS, etc.) very consistently - trying it
+    first would mean two guaranteed-failing requests (and two stack traces
+    in the logs) on every single check. Without a Twelve Data key, Yahoo
+    is tried first since it's the only free-without-a-key option.
     """
     interval = interval or config.CANDLE_INTERVAL
 
-    for ticker in (config.GOLD_TICKER, config.GOLD_TICKER_FALLBACK):
-        try:
-            df = _fetch_yfinance(ticker, period=period, interval=interval)
-            if not df.empty:
-                log.info("Fetched %d candles from Yahoo Finance (%s, %s)", len(df), ticker, interval)
-                return df
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Yahoo Finance fetch failed for %s: %s", ticker, exc)
+    def _try_yahoo():
+        for ticker in (config.GOLD_TICKER, config.GOLD_TICKER_FALLBACK):
+            try:
+                df = _fetch_yfinance(ticker, period=period, interval=interval)
+                if not df.empty:
+                    log.info("Fetched %d candles from Yahoo Finance (%s, %s)", len(df), ticker, interval)
+                    return df
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Yahoo Finance fetch failed for %s: %s", ticker, exc)
+        return pd.DataFrame()
 
-    if config.TWELVEDATA_API_KEY:
+    def _try_twelvedata():
+        if not config.TWELVEDATA_API_KEY:
+            return pd.DataFrame()
         try:
             df = _fetch_twelvedata(interval)
             if not df.empty:
@@ -104,6 +115,13 @@ def get_candles(interval: str = None, period: str = "60d") -> pd.DataFrame:
                 return df
         except Exception as exc:  # noqa: BLE001
             log.warning("Twelve Data fetch failed: %s", exc)
+        return pd.DataFrame()
+
+    providers = [_try_twelvedata, _try_yahoo] if config.TWELVEDATA_API_KEY else [_try_yahoo, _try_twelvedata]
+    for provider in providers:
+        df = provider()
+        if not df.empty:
+            return df
 
     # Last resort: daily candles from stooq (coarser, but keeps the bot alive)
     try:
