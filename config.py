@@ -227,7 +227,13 @@ ATR_PERIOD = _int("ATR_PERIOD", 14)
 
 # Only re-alert on the SAME signal type after this many hours have passed,
 # even if the confluence score stays above the threshold on every check.
-REALERT_COOLDOWN_HOURS = _float("REALERT_COOLDOWN_HOURS", 0.1667)  # ~10 minutes
+# By user request (24.09, raised from ~10 min): with the active window
+# (07:30-23:00 Mon-Fri = ~930 min/day) and a 15-min check interval, a
+# 10-minute cooldown could in the worst case (one direction holding all
+# day) approach ~93 emails/day - uncomfortably close to Resend's free-tier
+# cap of 100 emails/day. 25 minutes brings that worst case down to ~37/day,
+# a much safer margin.
+REALERT_COOLDOWN_HOURS = _float("REALERT_COOLDOWN_HOURS", 25 / 60)  # ~25 minutes
 
 # --- Email (Resend API) ------------------------------------------------------
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")

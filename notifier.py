@@ -34,7 +34,19 @@ def _send(subject: str, html: str) -> bool:
         if resp.status_code >= 300:
             log.error("Resend API error %s: %s", resp.status_code, resp.text)
             return False
-        log.info("Alert email sent: %s", subject)
+        # Log Resend's own message id (24.09, by user request after a "log
+        # says sent but no email arrived" report) - the API returning 2xx
+        # only means Resend ACCEPTED the request, not that it was delivered
+        # to the inbox (it can still bounce/land in spam/get blocked
+        # afterwards). Logging the id lets you look this exact message up
+        # at resend.com/emails to see its real delivery status.
+        resend_id = None
+        try:
+            resend_id = resp.json().get("id")
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("Alert email accepted by Resend: %s (id=%s, to=%s) - check resend.com/emails for actual delivery status",
+                  subject, resend_id, config.ALERT_EMAIL)
         return True
     except Exception as exc:  # noqa: BLE001
         log.error("Failed to send email via Resend: %s", exc)
