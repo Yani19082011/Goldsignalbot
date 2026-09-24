@@ -156,8 +156,12 @@ CANDLE_INTERVAL = os.environ.get("CANDLE_INTERVAL", "15m")
 # --- Scan schedule -----------------------------------------------------------
 # How often (minutes) the background loop re-checks the market. Checking
 # much more often than the candle size above just re-reads the same
-# still-forming candle.
-CHECK_INTERVAL_MINUTES = _int("CHECK_INTERVAL_MINUTES", 15)
+# still-forming candle. By user request (24.09): matched to
+# REALERT_COOLDOWN_HOURS (~25 min) so the mental model is simple - check,
+# email if there's a signal, check again ~25 min later, email again if it's
+# still there (or a new one shows up) - instead of checking every 15 min
+# but only being ALLOWED to re-email every 25.
+CHECK_INTERVAL_MINUTES = _int("CHECK_INTERVAL_MINUTES", 25)
 
 # --- Active window -----------------------------------------------------------
 # By user request (18.09): only check/alert Monday-Friday, 07:30-23:00
@@ -237,6 +241,20 @@ ATR_PERIOD = _int("ATR_PERIOD", 14)
 # cap of 100 emails/day. 25 minutes brings that worst case down to ~37/day,
 # a much safer margin.
 REALERT_COOLDOWN_HOURS = _float("REALERT_COOLDOWN_HOURS", 25 / 60)  # ~25 minutes
+
+# By user request (24.09): "ако потенциал за short/long e по-висок, да
+# даде повече време да хитне take profit-a" - a high-conviction signal
+# (score >= STRONG_SIGNAL_SCORE_THRESHOLD out of 7) usually implies a
+# further take-profit target (see the analog-based sizing in signals.py -
+# a stronger/more confident analog match tends to carry a bigger realized
+# move), so re-alerting on it again after only the normal ~25 min is often
+# premature - the trade hasn't had time to develop toward that target yet.
+# After sending a signal whose score met this threshold, the NEXT alert for
+# that same direction waits STRONG_SIGNAL_COOLDOWN_HOURS (~35 min) instead
+# of the usual REALERT_COOLDOWN_HOURS. A normal-strength signal (below the
+# threshold) keeps the usual cooldown - see _should_send() in app.py.
+STRONG_SIGNAL_SCORE_THRESHOLD = _int("STRONG_SIGNAL_SCORE_THRESHOLD", 5)
+STRONG_SIGNAL_COOLDOWN_HOURS = _float("STRONG_SIGNAL_COOLDOWN_HOURS", 35 / 60)  # ~35 minutes
 
 # --- Email (Resend API) ------------------------------------------------------
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")

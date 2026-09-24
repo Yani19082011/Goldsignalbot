@@ -39,7 +39,7 @@ state = {
             "last_price": None,
             "last_direction": "NONE",
             "last_score": 0,
-            "last_signal_sent": {"BUY": None, "SELL": None},  # direction -> datetime
+            "last_signal_sent": {"BUY": None, "SELL": None},  # direction -> {"time": datetime, "score": int}
             "consecutive_errors": 0,
             "last_error": None,
             "last_data_source": None,  # which provider actually served the last successful check - see data_fetch.get_candles
@@ -67,12 +67,25 @@ def _within_active_window() -> bool:
     return start <= now_local <= end
 
 
+def _cooldown_hours_for(score: int) -> float:
+    """By user request (24.09): a strong/high-conviction signal gets a
+    longer cooldown before the next alert - see the comment on
+    STRONG_SIGNAL_SCORE_THRESHOLD in config.py."""
+    if score >= config.STRONG_SIGNAL_SCORE_THRESHOLD:
+        return config.STRONG_SIGNAL_COOLDOWN_HOURS
+    return config.REALERT_COOLDOWN_HOURS
+
+
 def _should_send(inst_state: dict, direction: str) -> bool:
-    """Dedupe: only re-alert the same direction after the cooldown window."""
+    """Dedupe: only re-alert the same direction after a cooldown that
+    scales with how strong the LAST SENT alert for that direction was
+    (not the current check's score - the wait is about giving that earlier
+    trade room to develop)."""
     last_sent = inst_state["last_signal_sent"].get(direction)
     if last_sent is None:
         return True
-    return datetime.now(timezone.utc) - last_sent > timedelta(hours=config.REALERT_COOLDOWN_HOURS)
+    cooldown_hours = _cooldown_hours_for(last_sent["score"])
+    return datetime.now(timezone.utc) - last_sent["time"] > timedelta(hours=cooldown_hours)
 
 
 def check_instrument(instrument: dict):
@@ -97,10 +110,29 @@ def check_instrument(instrument: dict):
         )
 
         alertable_directions = ("BUY",) if config.ALERT_ONLY_BUY else ("BUY", "SELL")
-        if result.direction in alertable_directions and _should_send(inst_state, result.direction):
-            sent = notifier.send_signal_email(result, instrument)
-            if sent:
-                inst_state["last_signal_sent"][result.direction] = datetime.now(timezone.utc)
+        if result.direction in alertable_directions:
+            if _should_send(inst_state, result.direction):
+                sent = notifier.send_signal_email(result, instrument)
+                if sent:
+                    inst_state["last_signal_sent"][result.direction] = {
+                        "time": datetime.now(timezone.utc), "score": result.score,
+                    }
+            else:
+                # By user request (24.09, after a "log shows BUY but no email
+                # arrived" report): make the cooldown skip visible in the
+                # logs too, not just the ALERT_ONLY_BUY skip below - a
+                # qualifying signal that doesn't email can otherwise look
+                # identical to a bug.
+                last_sent = inst_state["last_signal_sent"].get(result.direction)
+                minutes_ago = (datetime.now(timezone.utc) - last_sent["time"]).total_seconds() / 60 if last_sent else None
+                cooldown_minutes = _cooldown_hours_for(last_sent["score"]) * 60 if last_sent else config.REALERT_COOLDOWN_HOURS * 60
+                log.info(
+                    "[%s] %s setup seen (score=%d/%d) but still in cooldown (last %s alert was %.1f min ago, "
+                    "scored %s/7 so cooldown is %.0f min) - not re-emailing.",
+                    key, result.direction, result.score, result.max_score, result.direction,
+                    minutes_ago if minutes_ago is not None else -1,
+                    last_sent["score"] if last_sent else "?", cooldown_minutes,
+                )
         elif result.direction == "SELL" and config.ALERT_ONLY_BUY:
             log.info("[%s] SELL setup seen (score=%d/%d) but ALERT_ONLY_BUY=true - not emailing.", key, result.score, result.max_score)
 
