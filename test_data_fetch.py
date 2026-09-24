@@ -9,8 +9,21 @@ import pandas as pd
 import config
 import data_fetch
 
-GOLD = config.INSTRUMENTS[0]
-assert GOLD["key"] == "GOLD"
+# Gold is disabled by default now (ENABLE_GOLD=false - the bot is Tech100-only
+# out of the box, 24.09), so it may not be in config.INSTRUMENTS. Its fetch
+# logic is still fully in place and tested here regardless, built straight
+# from the same GOLD_* constants config.py itself uses when ENABLE_GOLD=true.
+GOLD = {
+    "key": "GOLD",
+    "name": "злато (XAU/USD)",
+    "currency": "$",
+    "yahoo_ticker": config.GOLD_TICKER,
+    "yahoo_fallback": config.GOLD_TICKER_FALLBACK,
+    "twelvedata_symbol": config.GOLD_TWELVEDATA_SYMBOL,
+    "stooq_symbol": config.GOLD_STOOQ_SYMBOL,
+    "sanity_min": 800.0,
+    "sanity_max": 8000.0,
+}
 TECH100 = next((i for i in config.INSTRUMENTS if i["key"] == "TECH100"), None)
 
 
@@ -76,17 +89,58 @@ def test_twelvedata_is_skipped_without_an_api_key():
     orig_yf = data_fetch._fetch_yfinance
     orig_stooq = data_fetch._fetch_stooq
     orig_key = config.TWELVEDATA_API_KEY
+    orig_allow_daily = config.ALLOW_DAILY_FALLBACK
     data_fetch._fetch_yfinance = fake_fetch_yfinance
     data_fetch._fetch_stooq = fake_fetch_stooq
     config.TWELVEDATA_API_KEY = ""  # not configured
+    config.ALLOW_DAILY_FALLBACK = True  # opting in to the coarse daily fallback for this test
     try:
         df = data_fetch.get_candles(GOLD, interval="15m")
-        assert not df.empty, "should still fall through to stooq"
+        assert not df.empty, "should still fall through to stooq when explicitly allowed"
         print("[no-twelvedata-key] correctly skipped straight to stooq - OK")
     finally:
         data_fetch._fetch_yfinance = orig_yf
         data_fetch._fetch_stooq = orig_stooq
         config.TWELVEDATA_API_KEY = orig_key
+        config.ALLOW_DAILY_FALLBACK = orig_allow_daily
+
+
+def test_daily_stooq_fallback_is_not_used_by_default():
+    # Regression test for the REAL incident (24.09): "искам цената да се
+    # променя, преди не се променяше на всеки имейл" - the bot was silently
+    # falling back to stooq's DAILY-only candles whenever Yahoo failed (very
+    # common from Render's IP) and no Twelve Data key was set, so the price
+    # (and every indicator computed "on 15-minute candles") stayed frozen
+    # for a whole trading day. By default now (ALLOW_DAILY_FALLBACK=false)
+    # that must NOT happen silently - it should raise instead, so the
+    # existing error-email path tells the user to fix their data source
+    # instead of emailing a stale-looking signal.
+    def fake_fetch_yfinance(ticker, period, interval):
+        raise RuntimeError("simulated Yahoo outage")
+
+    def fake_fetch_stooq(symbol):
+        return _sample_df(n=30)  # would succeed if it were ever called
+
+    orig_yf = data_fetch._fetch_yfinance
+    orig_stooq = data_fetch._fetch_stooq
+    orig_key = config.TWELVEDATA_API_KEY
+    orig_allow_daily = config.ALLOW_DAILY_FALLBACK
+    data_fetch._fetch_yfinance = fake_fetch_yfinance
+    data_fetch._fetch_stooq = fake_fetch_stooq
+    config.TWELVEDATA_API_KEY = ""  # not configured
+    config.ALLOW_DAILY_FALLBACK = False  # the default
+    try:
+        try:
+            data_fetch.get_candles(GOLD, interval="15m")
+            raise AssertionError("expected RuntimeError - stooq's daily data must not be used silently by default")
+        except RuntimeError as e:
+            assert "any source" in str(e)
+            print("[daily-fallback-off-by-default] correctly refused stale daily data and raised - OK")
+    finally:
+        data_fetch._fetch_yfinance = orig_yf
+        data_fetch._fetch_stooq = orig_stooq
+        config.TWELVEDATA_API_KEY = orig_key
+        config.ALLOW_DAILY_FALLBACK = orig_allow_daily
 
 
 def test_raises_only_when_every_provider_fails():
@@ -156,6 +210,34 @@ def test_twelvedata_interval_mapping_and_parsing():
     finally:
         requests.get = orig_get
         config.TWELVEDATA_API_KEY = orig_key
+
+
+def test_gold_is_disabled_by_default_tech100_only():
+    # By user request (24.09): bot is Tech100-only out of the box.
+    keys = [i["key"] for i in config.INSTRUMENTS]
+    assert "GOLD" not in keys, f"gold should be disabled by default (ENABLE_GOLD=false), got instruments={keys}"
+    assert "TECH100" in keys
+    print(f"[gold-disabled-by-default] INSTRUMENTS={keys} - OK")
+
+
+def test_enable_gold_env_var_brings_gold_back():
+    import importlib
+    import os
+
+    orig = os.environ.get("ENABLE_GOLD")
+    os.environ["ENABLE_GOLD"] = "true"
+    try:
+        import config as config_module
+        reloaded = importlib.reload(config_module)
+        keys = [i["key"] for i in reloaded.INSTRUMENTS]
+        assert "GOLD" in keys, f"ENABLE_GOLD=true should bring gold back, got instruments={keys}"
+        print(f"[enable-gold-env-var] INSTRUMENTS={keys} with ENABLE_GOLD=true - OK")
+    finally:
+        if orig is None:
+            os.environ.pop("ENABLE_GOLD", None)
+        else:
+            os.environ["ENABLE_GOLD"] = orig
+        importlib.reload(config)  # restore the default (ENABLE_GOLD=false) for later tests
 
 
 def test_tech100_instrument_is_configured_with_its_own_symbols():
@@ -238,14 +320,15 @@ def test_sanity_check_still_guards_an_unscaled_wrong_reading():
     instrument["twelvedata_scale"] = 1.0  # simulate the misconfiguration
     instrument["stooq_scale"] = 1.0  # this fallback's fake data is already correctly scaled
 
-    orig_yf, orig_td, orig_stooq, orig_key = (
+    orig_yf, orig_td, orig_stooq, orig_key, orig_allow_daily = (
         data_fetch._fetch_yfinance, data_fetch._fetch_twelvedata,
-        data_fetch._fetch_stooq, config.TWELVEDATA_API_KEY,
+        data_fetch._fetch_stooq, config.TWELVEDATA_API_KEY, config.ALLOW_DAILY_FALLBACK,
     )
     data_fetch._fetch_yfinance = fake_fetch_yfinance
     data_fetch._fetch_twelvedata = fake_fetch_twelvedata
     data_fetch._fetch_stooq = fake_fetch_stooq
     config.TWELVEDATA_API_KEY = "fake-key"
+    config.ALLOW_DAILY_FALLBACK = True  # exercising the stooq fallback path itself in this test
     try:
         df = data_fetch.get_candles(instrument, interval="15m")
         assert not df.empty
@@ -259,6 +342,7 @@ def test_sanity_check_still_guards_an_unscaled_wrong_reading():
         data_fetch._fetch_twelvedata = orig_td
         data_fetch._fetch_stooq = orig_stooq
         config.TWELVEDATA_API_KEY = orig_key
+        config.ALLOW_DAILY_FALLBACK = orig_allow_daily
 
 
 if __name__ == "__main__":
@@ -266,8 +350,11 @@ if __name__ == "__main__":
         test_falls_back_to_second_yahoo_ticker_when_first_is_empty,
         test_falls_back_to_twelvedata_when_yahoo_fails_entirely,
         test_twelvedata_is_skipped_without_an_api_key,
+        test_daily_stooq_fallback_is_not_used_by_default,
         test_raises_only_when_every_provider_fails,
         test_twelvedata_interval_mapping_and_parsing,
+        test_gold_is_disabled_by_default_tech100_only,
+        test_enable_gold_env_var_brings_gold_back,
         test_tech100_instrument_is_configured_with_its_own_symbols,
         test_tech100_qqq_reading_gets_scaled_to_index_level,
         test_sanity_check_still_guards_an_unscaled_wrong_reading,

@@ -1,7 +1,8 @@
 """
-GoldSignalBot - watches gold (XAU/USD) and USA Tech 100 (Nasdaq-100) and
-emails you when a confluence of technical indicators points to a buy or
-sell opportunity on either one.
+GoldSignalBot - by default watches USA Tech 100 (Nasdaq-100) only (gold
+support is still fully in place - set ENABLE_GOLD=true in Render to bring
+it back) and emails you when a confluence of technical indicators, plus an
+analog-match against similar recent setups, points to a buy opportunity.
 
 Runs as a Flask web service (for Render's free tier, which requires an
 HTTP port to stay awake) with a background thread doing the actual
@@ -41,6 +42,7 @@ state = {
             "last_signal_sent": {"BUY": None, "SELL": None},  # direction -> datetime
             "consecutive_errors": 0,
             "last_error": None,
+            "last_data_source": None,  # which provider actually served the last successful check - see data_fetch.get_candles
         }
         for inst in config.INSTRUMENTS
     },
@@ -77,13 +79,15 @@ def check_instrument(instrument: dict):
     key = instrument["key"]
     inst_state = state["instruments"][key]
     try:
-        df = data_fetch.get_candles(instrument, interval=config.CANDLE_INTERVAL, period="60d")
+        source_info = {}
+        df = data_fetch.get_candles(instrument, interval=config.CANDLE_INTERVAL, period="60d", source_info=source_info)
         result = signals.evaluate(df)
 
         inst_state["last_check"] = datetime.now(timezone.utc).isoformat()
         inst_state["last_price"] = result.price
         inst_state["last_direction"] = result.direction
         inst_state["last_score"] = result.score
+        inst_state["last_data_source"] = source_info.get("source")
         inst_state["consecutive_errors"] = 0
         inst_state["last_error"] = None
 

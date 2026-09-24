@@ -51,6 +51,11 @@ def send_signal_email(result, instrument: dict) -> bool:
     cur = instrument.get("currency", "$")
 
     reasons_html = "".join(f"<li>{r}</li>" for r in result.reasons)
+    sizing_note = (
+        "на база подобна ситуация от последните ~1-2 дни"
+        if getattr(result, "sizing_method", "atr") == "analog"
+        else "на база средна волатилност (ATR)"
+    )
 
     subject = f"{emoji} Сигнал за {action_text} - {name} @ {cur}{result.price:,.2f}"
     html = f"""
@@ -67,10 +72,12 @@ def send_signal_email(result, instrument: dict) -> bool:
           <tr><td style="padding:4px 0; color:#666;">Предложен Take-Profit</td><td style="text-align:right;">{cur}{result.take_profit:,.2f}</td></tr>
           <tr><td style="padding:4px 0; color:#666;">Час на сигнала (UTC)</td><td style="text-align:right;">{result.timestamp}</td></tr>
         </table>
+        <p style="font-size:12px; color:#888; margin:-10px 0 16px;">Stop-Loss/Take-Profit изчислени {sizing_note} - нива, не гарантирани.</p>
         <p style="font-size:14px; color:#333; margin-bottom:6px;"><strong>Защо се задейства сигналът:</strong></p>
         <ul style="font-size:13px; color:#444; margin-top:0; padding-left:18px;">{reasons_html}</ul>
         <p style="font-size:11px; color:#999; margin-top:18px; border-top:1px solid #eee; padding-top:10px;">
-          Автоматичен сигнал от технически индикатори (EMA, RSI, MACD, Bollinger Bands).
+          Автоматичен сигнал от технически индикатори (EMA, RSI, MACD, Bollinger Bands,
+          свещни фигури, аналогични ситуации от последните дни).
           Това не е финансов съвет - пазарът се движи и от новини (лихви,
           геополитика, макро данни), които тези индикатори не виждат.
           Провери сам преди да отвориш позиция.
@@ -82,10 +89,12 @@ def send_signal_email(result, instrument: dict) -> bool:
 
 
 def send_test_email() -> bool:
+    import config
+    names = ", ".join(inst["name"] for inst in config.INSTRUMENTS) or "(няма конфигурирани инструменти)"
     return _send(
         "✅ GoldSignalBot е стартиран",
-        "<p>Ботът стартира успешно и ще ти изпраща имейл при всеки сигнал за покупка "
-        "или продажба на следените инструменти (злато, USA Tech 100).</p>",
+        f"<p>Ботът стартира успешно и ще ти изпраща имейл при сигнал за покупка "
+        f"на следените инструменти: {names}.</p>",
     )
 
 

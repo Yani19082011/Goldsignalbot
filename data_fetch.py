@@ -36,7 +36,8 @@ _TWELVEDATA_INTERVAL = {
 
 
 def _fetch_yfinance(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
+    df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False,
+                      timeout=config.FETCH_TIMEOUT_SECONDS)
     if df is None or df.empty:
         return pd.DataFrame()
     # yfinance sometimes returns MultiIndex columns for a single ticker
@@ -57,7 +58,7 @@ def _fetch_twelvedata(symbol: str, interval: str, outputsize: int = 500) -> pd.D
         "format": "JSON",
         "order": "ASC",
     }
-    resp = requests.get("https://api.twelvedata.com/time_series", params=params, timeout=20)
+    resp = requests.get("https://api.twelvedata.com/time_series", params=params, timeout=config.FETCH_TIMEOUT_SECONDS)
     resp.raise_for_status()
     data = resp.json()
     if data.get("status") == "error" or "values" not in data:
@@ -76,7 +77,7 @@ def _fetch_twelvedata(symbol: str, interval: str, outputsize: int = 500) -> pd.D
 
 def _fetch_stooq(symbol: str) -> pd.DataFrame:
     url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
-    resp = requests.get(url, timeout=20)
+    resp = requests.get(url, timeout=config.FETCH_TIMEOUT_SECONDS)
     resp.raise_for_status()
     df = pd.read_csv(io.StringIO(resp.text))
     if df.empty or "Close" not in df.columns:
@@ -130,7 +131,7 @@ def _passes_sanity_check(df: pd.DataFrame, instrument: dict, source: str) -> boo
     return False
 
 
-def get_candles(instrument: dict = None, interval: str = None, period: str = "60d") -> pd.DataFrame:
+def get_candles(instrument: dict = None, interval: str = None, period: str = "60d", source_info: dict = None) -> pd.DataFrame:
     """
     Returns an OHLCV DataFrame indexed by timestamp, newest last, for the
     given instrument (a dict from config.INSTRUMENTS - defaults to the
@@ -144,6 +145,12 @@ def get_candles(instrument: dict = None, interval: str = None, period: str = "60
     first would mean two guaranteed-failing requests (and two stack traces
     in the logs) on every single check. Without a Twelve Data key, Yahoo
     is tried first since it's the only free-without-a-key option.
+
+    If `source_info` (a dict) is passed, it's filled in with which source
+    actually served this call (source_info["source"]) - by user request
+    (24.09), so app.py can surface it on the "/" health endpoint and you
+    can see at a glance whether checks are running on live intraday data
+    or (if you've opted into ALLOW_DAILY_FALLBACK) stale daily data.
     """
     instrument = instrument or config.INSTRUMENTS[0]
     interval = interval or config.CANDLE_INTERVAL
@@ -156,46 +163,68 @@ def get_candles(instrument: dict = None, interval: str = None, period: str = "60
                 df = _fetch_yfinance(ticker, period=period, interval=interval)
                 if not df.empty and _passes_sanity_check(df, instrument, f"Yahoo Finance ({ticker})"):
                     log.info("Fetched %d candles from Yahoo Finance (%s, %s, %s)", len(df), instrument["key"], ticker, interval)
-                    return df
+                    return df, f"Yahoo Finance ({ticker})"
             except Exception as exc:  # noqa: BLE001
                 log.warning("Yahoo Finance fetch failed for %s (%s): %s", instrument["key"], ticker, exc)
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     def _try_twelvedata():
         symbol = instrument.get("twelvedata_symbol")
         if not config.TWELVEDATA_API_KEY or not symbol:
-            return pd.DataFrame()
+            return pd.DataFrame(), None
         try:
             df = _fetch_twelvedata(symbol, interval)
             df = _scale_ohlc(df, instrument.get("twelvedata_scale", 1.0))
             if not df.empty and _passes_sanity_check(df, instrument, f"Twelve Data ({symbol})"):
                 log.info("Fetched %d candles from Twelve Data (%s, %s, %s)", len(df), instrument["key"], symbol, interval)
-                return df
+                return df, f"Twelve Data ({symbol})"
         except Exception as exc:  # noqa: BLE001
             log.warning("Twelve Data fetch failed for %s: %s", instrument["key"], exc)
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     providers = [_try_twelvedata, _try_yahoo] if config.TWELVEDATA_API_KEY else [_try_yahoo, _try_twelvedata]
     for provider in providers:
-        df = provider()
+        df, source = provider()
         if not df.empty:
+            if source_info is not None:
+                source_info["source"] = source
             return df
 
-    # Last resort: daily candles from stooq (coarser, but keeps the bot alive)
+    # Last resort: daily candles from stooq. OFF by default (see
+    # ALLOW_DAILY_FALLBACK in config.py, 24.09) - stooq's free endpoint is
+    # daily-only, and silently using once-a-day data to drive a "15-minute"
+    # confluence/analog-match signal is exactly what made the price (and
+    # the signal) look frozen for hours in the past. Better to fail loudly
+    # here (-> triggers the existing error email after repeated failures)
+    # than to keep emailing stale-looking signals.
     symbol = instrument.get("stooq_symbol")
-    if symbol:
+    if symbol and config.ALLOW_DAILY_FALLBACK:
         try:
             df = _fetch_stooq(symbol)
             df = _scale_ohlc(df, instrument.get("stooq_scale", 1.0))
             if not df.empty and _passes_sanity_check(df, instrument, f"stooq.com ({symbol})"):
-                log.info("Fetched %d daily candles from stooq.com (%s, fallback)", len(df), instrument["key"])
+                log.warning(
+                    "%s: falling back to stooq.com's DAILY candles (ALLOW_DAILY_FALLBACK=true) - "
+                    "the price/signal will only update once a day until Yahoo/Twelve Data recover.",
+                    instrument["key"],
+                )
+                if source_info is not None:
+                    source_info["source"] = f"stooq.com daily ({symbol})"
                 return df
         except Exception as exc:  # noqa: BLE001
             log.warning("stooq.com fallback fetch failed for %s: %s", instrument["key"], exc)
+    elif symbol:
+        log.warning(
+            "%s: Yahoo Finance and Twelve Data both failed/unavailable, and ALLOW_DAILY_FALLBACK=false "
+            "so stooq.com's daily-only data was NOT used (would give a stale, wrong-granularity signal). "
+            "Add/check TWELVEDATA_API_KEY to fix this properly.",
+            instrument["key"],
+        )
 
-    raise RuntimeError(
-        f"Could not fetch {instrument['key']} price data from any source (Yahoo Finance, Twelve Data, stooq.com)"
-    )
+    sources_tried = "Yahoo Finance, Twelve Data"
+    if config.ALLOW_DAILY_FALLBACK:
+        sources_tried += ", stooq.com (daily)"
+    raise RuntimeError(f"Could not fetch {instrument['key']} intraday price data from any source ({sources_tried})")
 
 
 def get_daily_candles(instrument: dict = None, period: str = "1y") -> pd.DataFrame:

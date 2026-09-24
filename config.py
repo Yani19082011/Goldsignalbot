@@ -37,8 +37,32 @@ def _int(name: str, default: int) -> int:
 #   2. Yahoo Finance, fallback ticker
 #   3. Twelve Data (only if TWELVEDATA_API_KEY is set - free key at
 #      twelvedata.com, no card required, 800 requests/day on the free plan)
-#   4. stooq.com daily candles (last resort, coarser, but keeps the bot alive)
+#   4. stooq.com daily candles (last resort - see ALLOW_DAILY_FALLBACK below,
+#      OFF by default since 24.09)
 TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
+
+# By user request (24.09 - "искам цената да се променя, преди не се
+# променяше на всеки имейл"): stooq.com's free endpoint only serves DAILY
+# candles, never 15-minute ones. If Yahoo Finance fails (common from
+# Render's IP) and no TWELVEDATA_API_KEY is set, the bot used to silently
+# fall back to that once-a-day price and keep computing "15-minute"
+# indicators on it - which is why the price (and the signal) could look
+# frozen for hours: the underlying data genuinely wasn't updating.
+# ALLOW_DAILY_FALLBACK=false (the default) stops that: if only daily data
+# is available, get_candles() raises instead of quietly using it, so the
+# existing consecutive-failure error email fires and tells you to add/check
+# TWELVEDATA_API_KEY - instead of you getting a signal that looks live but
+# is actually hours stale. Set to true only if you'd rather have a coarse
+# daily-only signal than no signal at all (not recommended for this bot's
+# whole confluence/analog-match design, which assumes real 15m candles).
+ALLOW_DAILY_FALLBACK = _bool("ALLOW_DAILY_FALLBACK", False)
+
+# Per-request network timeout (seconds) for every price-data HTTP call
+# (Yahoo, Twelve Data, stooq). By user request (24.09): keep one full check
+# cycle fast (~20-30s max end-to-end, ideally much faster) instead of
+# possibly hanging - this bounds the worst realistic case (every source
+# timing out back-to-back) to roughly 4x this value.
+FETCH_TIMEOUT_SECONDS = _int("FETCH_TIMEOUT_SECONDS", 8)
 
 GOLD_TICKER = os.environ.get("GOLD_TICKER", "XAUUSD=X")
 GOLD_TICKER_FALLBACK = os.environ.get("GOLD_TICKER_FALLBACK", "GC=F")
@@ -79,6 +103,11 @@ GOLD_STOOQ_SYMBOL = os.environ.get("GOLD_STOOQ_SYMBOL", "xauusd")
 # it drifting far enough to matter, or against either symbol ever silently
 # starting to fail again.
 ENABLE_TECH100 = _bool("ENABLE_TECH100", True)
+# By user request (24.09): the bot now tracks USA Tech 100 only by default.
+# Gold support is still fully in place (code, tests, email formatting) - set
+# ENABLE_GOLD=true in Render's Environment tab to bring it back alongside
+# Tech100, no code changes needed.
+ENABLE_GOLD = _bool("ENABLE_GOLD", False)
 TECH100_TICKER = os.environ.get("TECH100_TICKER", "NQ=F")
 TECH100_TICKER_FALLBACK = os.environ.get("TECH100_TICKER_FALLBACK", "^NDX")
 TECH100_TWELVEDATA_SYMBOL = os.environ.get("TECH100_TWELVEDATA_SYMBOL", "QQQ")
@@ -92,8 +121,9 @@ TECH100_ETF_SCALE = _float("TECH100_ETF_SCALE", 41.5)
 # sanity_min/sanity_max are a loose plausibility range (generous on purpose -
 # not a precision check, just "is this even remotely the right instrument
 # and scale") - see _passes_sanity_check() in data_fetch.py.
-INSTRUMENTS = [
-    {
+INSTRUMENTS = []
+if ENABLE_GOLD:
+    INSTRUMENTS.append({
         "key": "GOLD",
         "name": "злато (XAU/USD)",
         "currency": "$",
@@ -103,8 +133,7 @@ INSTRUMENTS = [
         "stooq_symbol": GOLD_STOOQ_SYMBOL,
         "sanity_min": _float("GOLD_SANITY_MIN", 800.0),
         "sanity_max": _float("GOLD_SANITY_MAX", 8000.0),
-    },
-]
+    })
 if ENABLE_TECH100:
     INSTRUMENTS.append({
         "key": "TECH100",
@@ -146,10 +175,35 @@ ACTIVE_END_HOUR = _int("ACTIVE_END_HOUR", 23)
 ACTIVE_END_MINUTE = _int("ACTIVE_END_MINUTE", 0)
 
 # --- Confluence strategy -----------------------------------------------------
-# Number of the 6 confluence conditions (see signals.py, candlesticks.py)
-# that must agree before an alert is sent. Higher = fewer, higher-conviction
-# alerts; lower = more alerts/noisier.
+# Number of the 7 confluence conditions (see signals.py, candlesticks.py,
+# analog_matcher.py) that must agree before an alert is sent. Higher =
+# fewer, higher-conviction alerts; lower = more alerts/noisier.
 CONFLUENCE_THRESHOLD = _int("CONFLUENCE_THRESHOLD", 3)
+
+# --- Analog / historical pattern matching (see analog_matcher.py) ----------
+# By user request (24.09): "look at the last 1-2 days for a similar setup,
+# see what happened, and use that for realistic (not crazy) TP/SL levels."
+# ANALOG_SHAPE_CANDLES: length of the recent "shape" being matched (10 x
+# 15m = ~2.5h of price action).
+# ANALOG_LOOKBACK_CANDLES: how far back to search for a similar shape (192 x
+# 15m = ~2 days of near-continuous trading).
+# ANALOG_FOLLOW_CANDLES: how many candles after a historical match to look
+# at to see what actually happened (8 x 15m = ~2h of follow-through).
+# ANALOG_MAX_DISTANCE: max allowed shape-match distance for a match to be
+# trusted at all - a poor match is ignored rather than forced into a signal
+# or used for sizing. Shapes are compared z-score-normalized (each window
+# rescaled to its own mean=0/std=1 before comparing), so this distance is in
+# standard-deviation units, not price or %: 0 = identical shape, larger =
+# less alike. Deliberately strict (checked empirically against pure random
+# walks searched over ANALOG_LOOKBACK_CANDLES candidates: <1% of the time
+# does random noise alone produce a match this close) - the point of this
+# feature is a trustworthy, real-outcome-based TP/SL, so a "maybe" match is
+# skipped rather than risking a wrong one; it just won't vote/size every
+# check, only when something genuinely similar shows up.
+ANALOG_SHAPE_CANDLES = _int("ANALOG_SHAPE_CANDLES", 10)
+ANALOG_LOOKBACK_CANDLES = _int("ANALOG_LOOKBACK_CANDLES", 192)
+ANALOG_FOLLOW_CANDLES = _int("ANALOG_FOLLOW_CANDLES", 8)
+ANALOG_MAX_DISTANCE = _float("ANALOG_MAX_DISTANCE", 0.18)
 
 # By user request (18.09): only email BUY signals, never SELL. SELL signals
 # are still computed and logged/visible on "/" (useful context - "the bot

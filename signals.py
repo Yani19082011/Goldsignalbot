@@ -1,9 +1,9 @@
 """
 Confluence-based buy/sell signal logic.
 
-Six independent conditions are checked per instrument's candles. Each one
+Seven independent conditions are checked per instrument's candles. Each one
 votes BUY, SELL, or neutral. When enough of them agree (CONFLUENCE_THRESHOLD
-out of 6), that's a signal:
+out of 7), that's a signal:
   1) EMA9 vs EMA21 trend/crossover
   2) Price vs EMA50 (broader trend filter)
   3) RSI(14) leaving oversold/overbought
@@ -11,6 +11,12 @@ out of 6), that's a signal:
   5) Bollinger Band support/resistance test
   6) Candlestick pattern (hammer, engulfing, morning/evening star, ... -
      see candlesticks.py; added 18.09 by user request)
+  7) Analog match: is the current price shape similar to a setup from the
+     last day or two, and which way did that historical analog resolve? -
+     see analog_matcher.py; added 24.09 by user request. This condition
+     also drives take_profit/stop_loss sizing below (real historical
+     outcome instead of a generic ATR multiple) when it's a confident
+     match in the same direction as the overall signal.
 
 This is a rule-based technical indicator tool, not financial advice.
 Markets move on macro/news events (Fed decisions, geopolitics, USD
@@ -22,8 +28,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+import analog_matcher
 import candlesticks
 import config
+
+MAX_SCORE = 7
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +110,10 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # Confluence scoring
 # ---------------------------------------------------------------------------
 
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
 @dataclass
 class SignalResult:
     direction: str  # "BUY", "SELL", or "NONE"
@@ -111,22 +124,59 @@ class SignalResult:
     atr: float = 0.0
     rsi: float = 0.0
     timestamp: object = None
+    # Analog-match context (see analog_matcher.py) - used below to size
+    # stop_loss/take_profit off a real historical outcome instead of a
+    # generic ATR multiple, when it's a confident match agreeing with
+    # `direction`. Distance/candles_ago are kept for logging/debugging.
+    analog_direction: str = "NONE"
+    analog_confident: bool = False
+    analog_favorable_pct: float = 0.0
+    analog_adverse_pct: float = 0.0
+    analog_distance: float = float("inf")
+    analog_candles_ago: int = -1
+
+    @property
+    def _uses_analog_sizing(self) -> bool:
+        return (
+            self.direction in ("BUY", "SELL")
+            and self.analog_confident
+            and self.analog_direction == self.direction
+            and self.analog_adverse_pct > 0
+            and self.analog_favorable_pct > 0
+        )
+
+    @property
+    def sizing_method(self) -> str:
+        """For transparency in the email - which method produced the
+        stop_loss/take_profit below."""
+        return "analog" if self._uses_analog_sizing else "atr"
 
     @property
     def stop_loss(self):
-        if self.direction == "BUY":
-            return round(self.price - 2 * self.atr, 2)
-        if self.direction == "SELL":
-            return round(self.price + 2 * self.atr, 2)
-        return None
+        if self.direction not in ("BUY", "SELL"):
+            return None
+        if self._uses_analog_sizing:
+            # How far the historical analog dipped against the move before
+            # it played out - clamped to a sane ATR range so one freak past
+            # move can't suggest an extreme stop.
+            raw_dist = self.price * (self.analog_adverse_pct / 100.0)
+            dist = _clamp(raw_dist, 0.5 * self.atr, 4 * self.atr)
+        else:
+            dist = 2 * self.atr
+        return round(self.price - dist, 2) if self.direction == "BUY" else round(self.price + dist, 2)
 
     @property
     def take_profit(self):
-        if self.direction == "BUY":
-            return round(self.price + 4 * self.atr, 2)  # ~1:2 risk:reward
-        if self.direction == "SELL":
-            return round(self.price - 4 * self.atr, 2)
-        return None
+        if self.direction not in ("BUY", "SELL"):
+            return None
+        if self._uses_analog_sizing:
+            # How far the historical analog ran in the winning direction -
+            # same sane clamp applied.
+            raw_dist = self.price * (self.analog_favorable_pct / 100.0)
+            dist = _clamp(raw_dist, 1.5 * self.atr, 8 * self.atr)
+        else:
+            dist = 4 * self.atr  # ~1:2 risk:reward vs. the ATR-based stop
+        return round(self.price + dist, 2) if self.direction == "BUY" else round(self.price - dist, 2)
 
 
 def evaluate(df: pd.DataFrame) -> SignalResult:
@@ -140,7 +190,7 @@ def evaluate(df: pd.DataFrame) -> SignalResult:
         subset=["ema_fast", "ema_mid", "ema_slow", "rsi", "macd_hist", "bb_lower", "atr"]
     )
     if len(d) < 3:
-        return SignalResult(direction="NONE", score=0, max_score=6, reasons=["not enough data yet"])
+        return SignalResult(direction="NONE", score=0, max_score=MAX_SCORE, reasons=["not enough data yet"])
 
     cur = d.iloc[-1]
     prev = d.iloc[-2]
@@ -208,6 +258,23 @@ def evaluate(df: pd.DataFrame) -> SignalResult:
     if bearish_patterns:
         sell_reasons.append("Свещна фигура: " + ", ".join(bearish_patterns))
 
+    # 7) Analog match: does the current price shape resemble a setup from
+    # the last day or two, and how did that one resolve? Only a confident
+    # (close-enough) match votes - a weak/no match simply doesn't count
+    # either way, same as any other inconclusive condition above.
+    analog = analog_matcher.find_analog(d)
+    if analog and analog.confident:
+        if analog.direction == "BUY":
+            buy_reasons.append(
+                "Аналогична ситуация преди ~%d свещи: тогава е последвало покачване (макс. ~%.2f%%)"
+                % (analog.candles_ago, analog.favorable_move_pct)
+            )
+        elif analog.direction == "SELL":
+            sell_reasons.append(
+                "Аналогична ситуация преди ~%d свещи: тогава е последвал спад (макс. ~%.2f%%)"
+                % (analog.candles_ago, analog.favorable_move_pct)
+            )
+
     buy_score = len(buy_reasons)
     sell_score = len(sell_reasons)
 
@@ -220,13 +287,26 @@ def evaluate(df: pd.DataFrame) -> SignalResult:
             buy_reasons if buy_score >= sell_score else sell_reasons
         )
 
+    if analog and analog.found:
+        analog_kwargs = dict(
+            analog_direction=analog.direction,
+            analog_confident=analog.confident,
+            analog_favorable_pct=analog.favorable_move_pct,
+            analog_adverse_pct=analog.adverse_move_pct,
+            analog_distance=analog.distance,
+            analog_candles_ago=analog.candles_ago,
+        )
+    else:
+        analog_kwargs = {}
+
     return SignalResult(
         direction=direction,
         score=score,
-        max_score=6,
+        max_score=MAX_SCORE,
         reasons=reasons,
         price=float(cur["Close"]),
         atr=float(cur["atr"]),
         rsi=float(cur["rsi"]),
         timestamp=d.index[-1],
+        **analog_kwargs,
     )
