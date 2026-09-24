@@ -205,12 +205,15 @@ ANALOG_LOOKBACK_CANDLES = _int("ANALOG_LOOKBACK_CANDLES", 192)
 ANALOG_FOLLOW_CANDLES = _int("ANALOG_FOLLOW_CANDLES", 8)
 ANALOG_MAX_DISTANCE = _float("ANALOG_MAX_DISTANCE", 0.18)
 
-# By user request (18.09): only email BUY signals, never SELL. SELL signals
-# are still computed and logged/visible on "/" (useful context - "the bot
-# went quiet" is very different from "the bot sees a SELL setup but isn't
-# telling you"), just never emailed. Set ALERT_ONLY_BUY=false to go back to
-# getting both directions.
-ALERT_ONLY_BUY = _bool("ALERT_ONLY_BUY", True)
+# By user request (18.09): only email BUY signals, never SELL - later
+# reverted (24.09): with BUY-only, the inbox always looks the same
+# regardless of what the market actually does, which is hard to tell apart
+# from the bot being stuck/broken. Now both directions are emailed by
+# default, so what you see genuinely reflects the confluence logic - BUY,
+# SELL, or quiet, whichever the market actually shows. SELL signals are
+# always computed and logged/visible on "/" either way. Set
+# ALERT_ONLY_BUY=true in Render if you want to go back to BUY-only.
+ALERT_ONLY_BUY = _bool("ALERT_ONLY_BUY", False)
 
 EMA_FAST = _int("EMA_FAST", 9)
 EMA_MID = _int("EMA_MID", 21)
