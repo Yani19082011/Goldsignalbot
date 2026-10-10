@@ -46,7 +46,8 @@ class AnalogResult:
     found: bool
     direction: str = "NONE"  # "BUY", "SELL", or "NONE" - which way the analog resolved
     distance: float = float("inf")  # shape-match distance, 0 = identical, smaller = better
-    confident: bool = False  # distance <= config.ANALOG_MAX_DISTANCE
+    confident: bool = False  # distance <= config.ANALOG_MAX_DISTANCE - good enough to be the 7th confluence VOTE
+    confident_sizing: bool = False  # distance <= config.ANALOG_SIZING_MAX_DISTANCE (looser) - good enough for TP/SL SIZING only, see config.py
     favorable_move_pct: float = 0.0  # how far price ran in the winning direction, %
     adverse_move_pct: float = 0.0  # how far price dipped against it first, %
     match_index: int = -1  # row position of the matched historical window, for logging
@@ -147,12 +148,14 @@ def find_analog(df: pd.DataFrame, shape_candles=None, lookback_candles=None, fol
         adverse_move_pct = 0.0
 
     confident = best_distance <= config.ANALOG_MAX_DISTANCE
+    confident_sizing = best_distance <= config.ANALOG_SIZING_MAX_DISTANCE
 
     return AnalogResult(
         found=True,
         direction=direction,
         distance=best_distance,
         confident=confident,
+        confident_sizing=confident_sizing,
         favorable_move_pct=favorable_move_pct,
         adverse_move_pct=adverse_move_pct,
         match_index=best_i,

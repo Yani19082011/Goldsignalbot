@@ -130,6 +130,7 @@ class SignalResult:
     # `direction`. Distance/candles_ago are kept for logging/debugging.
     analog_direction: str = "NONE"
     analog_confident: bool = False
+    analog_confident_sizing: bool = False
     analog_favorable_pct: float = 0.0
     analog_adverse_pct: float = 0.0
     analog_distance: float = float("inf")
@@ -137,9 +138,15 @@ class SignalResult:
 
     @property
     def _uses_analog_sizing(self) -> bool:
+        # Uses the looser ANALOG_SIZING_MAX_DISTANCE threshold (25.09) - a
+        # so-so shape match is still a better basis for "how far did this
+        # kind of move tend to run" than a generic ATR multiple, even when
+        # it's not solid enough to also count as the 7th confluence VOTE
+        # (analog_confident, the stricter threshold, used in evaluate()
+        # below).
         return (
             self.direction in ("BUY", "SELL")
-            and self.analog_confident
+            and self.analog_confident_sizing
             and self.analog_direction == self.direction
             and self.analog_adverse_pct > 0
             and self.analog_favorable_pct > 0
@@ -291,6 +298,7 @@ def evaluate(df: pd.DataFrame) -> SignalResult:
         analog_kwargs = dict(
             analog_direction=analog.direction,
             analog_confident=analog.confident,
+            analog_confident_sizing=analog.confident_sizing,
             analog_favorable_pct=analog.favorable_move_pct,
             analog_adverse_pct=analog.adverse_move_pct,
             analog_distance=analog.distance,

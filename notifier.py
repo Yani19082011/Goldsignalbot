@@ -9,6 +9,7 @@ import logging
 
 import requests
 
+import champion_strategy
 import config
 
 log = logging.getLogger("gold_signal_bot.notifier")
@@ -100,13 +101,93 @@ def send_signal_email(result, instrument: dict) -> bool:
     return _send(subject, html)
 
 
+def send_champion_signal_email(result, instrument_name: str = None) -> bool:
+    """Имейл при LONG/SHORT сигнал от шампионската стратегия (виж
+    champion_strategy.py) - изпраща се на всеки checkpoint, когато
+    quiet_accumulation и session_momentum се съгласят."""
+    instrument_name = instrument_name or config.GOLD_INSTRUMENT["name"]
+    is_long = result.direction == "LONG"
+    emoji = "🟢" if is_long else "🔴"
+    action_bg = "#e8f5e9" if is_long else "#fdecea"
+    action_color = "#1b5e20" if is_long else "#b71c1c"
+    action_text = "LONG (покупка)" if is_long else "SHORT (продажба)"
+
+    reasons_html = "".join(f"<li>{r}</li>" for r in result.reasons)
+
+    subject = f"{emoji} Шампионска стратегия: {action_text} - {instrument_name} @ ${result.price:,.2f}"
+    html = f"""
+    <div style="font-family: -apple-system, Arial, sans-serif; max-width: 560px; margin: 0 auto;">
+      <div style="background:{action_bg}; color:{action_color}; padding:16px 20px; border-radius:10px 10px 0 0;">
+        <h2 style="margin:0; font-size:20px;">{emoji} {instrument_name}: {action_text}</h2>
+        <p style="margin:4px 0 0; font-size:14px;">quiet_accumulation + session_momentum са съгласни</p>
+      </div>
+      <div style="border:1px solid #eee; border-top:none; padding:20px; border-radius:0 0 10px 10px;">
+        <table style="width:100%; border-collapse:collapse; font-size:14px; margin-bottom:16px;">
+          <tr><td style="padding:4px 0; color:#666;">Цена (вход)</td><td style="text-align:right; font-weight:600;">${result.price:,.2f}</td></tr>
+          <tr><td style="padding:4px 0; color:#666;">Stop-Loss</td><td style="text-align:right;">${result.stop_loss:,.2f}</td></tr>
+          <tr><td style="padding:4px 0; color:#666;">Take-Profit</td><td style="text-align:right;">${result.take_profit:,.2f}</td></tr>
+          <tr><td style="padding:4px 0; color:#666;">Час на свещта</td><td style="text-align:right;">{result.timestamp}</td></tr>
+        </table>
+        <p style="font-size:14px; color:#333; margin-bottom:6px;"><strong>Защо:</strong></p>
+        <ul style="font-size:13px; color:#444; margin-top:0; padding-left:18px;">{reasons_html}</ul>
+        <p style="font-size:11px; color:#999; margin-top:18px; border-top:1px solid #eee; padding-top:10px;">
+          Честен backtest (GC=F, 1h свещи, 09:00/16:30/23:00 Europe/Sofia checkpoint-и, 1:1 ATR R:R, ~2 години история):
+          {champion_strategy.BACKTEST_WIN_RATE_PCT}% win rate на {champion_strategy.BACKTEST_SIGNALS} сигнала,
+          out-of-sample {champion_strategy.BACKTEST_OOS_OLDER_PCT}% -> {champion_strategy.BACKTEST_OOS_NEWER_PCT}%
+          (random baseline ~{champion_strategy.BACKTEST_RANDOM_BASELINE_PCT}%). Това НЕ е гаранция за бъдещето -
+          пазарът може да промени режим по всяко време, а новини (лихви, геополитика, макро данни) не се виждат
+          в тези индикатори. Провери сам преди да отвориш позиция - не е финансов съвет.
+        </p>
+      </div>
+    </div>
+    """
+    return _send(subject, html)
+
+
+def send_champion_flat_email(result, instrument_name: str = None) -> bool:
+    """Имейл при FLAT (под-стратегиите не са съгласни, или едната мълчи) -
+    изпраща се ВИНАГИ на всеки checkpoint, за да има честен отговор на
+    всяка проверка, без форсирана LONG/SHORT догадка само за да има какво
+    да пише в имейла."""
+    instrument_name = instrument_name or config.GOLD_INSTRUMENT["name"]
+    reasons_html = "".join(f"<li>{r}</li>" for r in result.reasons)
+    price_part = f" @ ${result.price:,.2f}" if result.price else ""
+    subject = f"⚪ Шампионска стратегия: FLAT (без сигнал) - {instrument_name}{price_part}"
+    html = f"""
+    <div style="font-family: -apple-system, Arial, sans-serif; max-width: 560px; margin: 0 auto;">
+      <div style="background:#f0f0f0; color:#555; padding:16px 20px; border-radius:10px 10px 0 0;">
+        <h2 style="margin:0; font-size:20px;">⚪ {instrument_name}: FLAT</h2>
+        <p style="margin:4px 0 0; font-size:14px;">Честно - няма ясен edge точно сега.</p>
+      </div>
+      <div style="border:1px solid #eee; border-top:none; padding:20px; border-radius:0 0 10px 10px;">
+        <ul style="font-size:13px; color:#444; margin-top:0; padding-left:18px;">{reasons_html}</ul>
+        <p style="font-size:11px; color:#999; margin-top:18px; border-top:1px solid #eee; padding-top:10px;">
+          По-добре честно FLAT, отколкото форсирана LONG/SHORT догадка само за да има какво да пише в имейла -
+          шампионската стратегия (quiet_accumulation+session_momentum) е валидирана само за моментите, в които
+          двете под-стратегии реално се съгласят ({champion_strategy.BACKTEST_SIGNALS} от хиляди проверки в
+          backtest-а). Следващата проверка е на следващия checkpoint.
+        </p>
+      </div>
+    </div>
+    """
+    return _send(subject, html)
+
+
 def send_test_email() -> bool:
     import config
-    names = ", ".join(inst["name"] for inst in config.INSTRUMENTS) or "(няма конфигурирани инструменти)"
+    names = [inst["name"] for inst in config.INSTRUMENTS]
+    if config.ENABLE_GOLD:
+        checkpoints = ", ".join(f"{h:02d}:{m:02d}" for h, m in config.CHAMPION_CHECKPOINTS)
+        names.insert(0, f"{config.GOLD_INSTRUMENT['name']} (шампионска стратегия, checkpoint-и в {checkpoints} {config.CHAMPION_CHECKPOINTS_TZ})")
+    names_str = ", ".join(names) or "(няма конфигурирани инструменти)"
+    # By user request (02.10): текстът още казваше "само при покупка", въпреки
+    # че от 24.09 ALERT_ONLY_BUY=false по подразбиране и SELL също се праща -
+    # подвеждащо след всеки рестарт. Вече отразява реалната конфигурация.
+    signal_kind = "сигнал за покупка" if config.ALERT_ONLY_BUY else "сигнал за покупка или продажба"
     return _send(
         "✅ GoldSignalBot е стартиран",
-        f"<p>Ботът стартира успешно и ще ти изпраща имейл при сигнал за покупка "
-        f"на следените инструменти: {names}.</p>",
+        f"<p>Ботът стартира успешно и ще ти изпраща имейл при {signal_kind} "
+        f"на следените инструменти: {names_str}.</p>",
     )
 
 

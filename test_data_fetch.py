@@ -9,22 +9,31 @@ import pandas as pd
 import config
 import data_fetch
 
-# Gold is disabled by default now (ENABLE_GOLD=false - the bot is Tech100-only
-# out of the box, 24.09), so it may not be in config.INSTRUMENTS. Its fetch
-# logic is still fully in place and tested here regardless, built straight
-# from the same GOLD_* constants config.py itself uses when ENABLE_GOLD=true.
-GOLD = {
-    "key": "GOLD",
-    "name": "злато (XAU/USD)",
+# Gold is enabled by default now (ENABLE_GOLD=true, 10.10 - the bot is
+# gold-first out of the box, driven by the champion strategy's own
+# checkpoint loop, not this module's INSTRUMENTS list - see config.py).
+# Built straight from config.GOLD_INSTRUMENT so this test doesn't depend on
+# ENABLE_GOLD's current value either way.
+GOLD = config.GOLD_INSTRUMENT
+
+# Tech100 is disabled by default now (ENABLE_TECH100=false, 10.10) - its
+# fetch logic is still fully in place and tested here regardless, built
+# straight from the same TECH100_* constants config.py itself uses when
+# ENABLE_TECH100=true, so this doesn't depend on config.INSTRUMENTS (which
+# is empty unless ENABLE_TECH100 is actually set).
+TECH100 = {
+    "key": "TECH100",
+    "name": "USA Tech 100 (Nasdaq-100)",
     "currency": "$",
-    "yahoo_ticker": config.GOLD_TICKER,
-    "yahoo_fallback": config.GOLD_TICKER_FALLBACK,
-    "twelvedata_symbol": config.GOLD_TWELVEDATA_SYMBOL,
-    "stooq_symbol": config.GOLD_STOOQ_SYMBOL,
-    "sanity_min": 800.0,
-    "sanity_max": 8000.0,
+    "yahoo_ticker": config.TECH100_TICKER,
+    "yahoo_fallback": config.TECH100_TICKER_FALLBACK,
+    "twelvedata_symbol": config.TECH100_TWELVEDATA_SYMBOL,
+    "twelvedata_scale": config.TECH100_ETF_SCALE,
+    "stooq_symbol": config.TECH100_STOOQ_SYMBOL,
+    "stooq_scale": config.TECH100_ETF_SCALE,
+    "sanity_min": 8000.0,
+    "sanity_max": 60000.0,
 }
-TECH100 = next((i for i in config.INSTRUMENTS if i["key"] == "TECH100"), None)
 
 
 def _sample_df(n=60, start=2000.0):
@@ -212,36 +221,40 @@ def test_twelvedata_interval_mapping_and_parsing():
         config.TWELVEDATA_API_KEY = orig_key
 
 
-def test_gold_is_disabled_by_default_tech100_only():
-    # By user request (24.09): bot is Tech100-only out of the box.
+def test_gold_is_enabled_by_default_tech100_off():
+    # By user request (10.10 - "старите са за nasdaq 100"): bot is
+    # gold-first out of the box now. Gold itself runs through its own
+    # champion-strategy checkpoint loop (not config.INSTRUMENTS, which is
+    # only the old continuous confluence engine - Tech100, if re-enabled).
+    assert config.ENABLE_GOLD is True, "gold should be enabled by default (ENABLE_GOLD=true)"
     keys = [i["key"] for i in config.INSTRUMENTS]
-    assert "GOLD" not in keys, f"gold should be disabled by default (ENABLE_GOLD=false), got instruments={keys}"
-    assert "TECH100" in keys
-    print(f"[gold-disabled-by-default] INSTRUMENTS={keys} - OK")
+    assert "GOLD" not in keys, f"gold runs through its own champion loop, not INSTRUMENTS, got instruments={keys}"
+    assert "TECH100" not in keys, f"tech100 should be disabled by default (ENABLE_TECH100=false), got instruments={keys}"
+    print(f"[gold-enabled-by-default] ENABLE_GOLD={config.ENABLE_GOLD} INSTRUMENTS={keys} - OK")
 
 
-def test_enable_gold_env_var_brings_gold_back():
+def test_enable_tech100_env_var_brings_it_back():
     import importlib
     import os
 
-    orig = os.environ.get("ENABLE_GOLD")
-    os.environ["ENABLE_GOLD"] = "true"
+    orig = os.environ.get("ENABLE_TECH100")
+    os.environ["ENABLE_TECH100"] = "true"
     try:
         import config as config_module
         reloaded = importlib.reload(config_module)
         keys = [i["key"] for i in reloaded.INSTRUMENTS]
-        assert "GOLD" in keys, f"ENABLE_GOLD=true should bring gold back, got instruments={keys}"
-        print(f"[enable-gold-env-var] INSTRUMENTS={keys} with ENABLE_GOLD=true - OK")
+        assert "TECH100" in keys, f"ENABLE_TECH100=true should bring tech100 back, got instruments={keys}"
+        print(f"[enable-tech100-env-var] INSTRUMENTS={keys} with ENABLE_TECH100=true - OK")
     finally:
         if orig is None:
-            os.environ.pop("ENABLE_GOLD", None)
+            os.environ.pop("ENABLE_TECH100", None)
         else:
-            os.environ["ENABLE_GOLD"] = orig
-        importlib.reload(config)  # restore the default (ENABLE_GOLD=false) for later tests
+            os.environ["ENABLE_TECH100"] = orig
+        importlib.reload(config)  # restore the default (ENABLE_TECH100=false) for later tests
 
 
 def test_tech100_instrument_is_configured_with_its_own_symbols():
-    assert TECH100 is not None, "TECH100 should be enabled by default (ENABLE_TECH100 defaults to true)"
+    assert TECH100 is not None
     assert TECH100["yahoo_ticker"] != GOLD["yahoo_ticker"]
     assert TECH100["twelvedata_symbol"] != GOLD["twelvedata_symbol"]
 
@@ -353,8 +366,8 @@ if __name__ == "__main__":
         test_daily_stooq_fallback_is_not_used_by_default,
         test_raises_only_when_every_provider_fails,
         test_twelvedata_interval_mapping_and_parsing,
-        test_gold_is_disabled_by_default_tech100_only,
-        test_enable_gold_env_var_brings_gold_back,
+        test_gold_is_enabled_by_default_tech100_off,
+        test_enable_tech100_env_var_brings_it_back,
         test_tech100_instrument_is_configured_with_its_own_symbols,
         test_tech100_qqq_reading_gets_scaled_to_index_level,
         test_sanity_check_still_guards_an_unscaled_wrong_reading,

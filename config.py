@@ -64,8 +64,15 @@ ALLOW_DAILY_FALLBACK = _bool("ALLOW_DAILY_FALLBACK", False)
 # timing out back-to-back) to roughly 4x this value.
 FETCH_TIMEOUT_SECONDS = _int("FETCH_TIMEOUT_SECONDS", 8)
 
-GOLD_TICKER = os.environ.get("GOLD_TICKER", "XAUUSD=X")
-GOLD_TICKER_FALLBACK = os.environ.get("GOLD_TICKER_FALLBACK", "GC=F")
+# По заявка (10.10): GC=F (COMEX gold futures) е тикерът, върху който
+# шампионската стратегия (quiet_accumulation+session_momentum, виж
+# champion_strategy.py) беше честно backtest-вана и валидирана (72.4% win
+# rate, 29 сигнала, out-of-sample 68.4%->80.0%) - затова е primary сега,
+# не fallback. XAUUSD=X (спот форекс-стил тикер) е различен инструмент с
+# различни часове на търговия и форма на свещите, затова е само резервен
+# вариант, ако GC=F временно не отговори.
+GOLD_TICKER = os.environ.get("GOLD_TICKER", "GC=F")
+GOLD_TICKER_FALLBACK = os.environ.get("GOLD_TICKER_FALLBACK", "XAUUSD=X")
 GOLD_TWELVEDATA_SYMBOL = os.environ.get("TWELVEDATA_SYMBOL", os.environ.get("GOLD_TWELVEDATA_SYMBOL", "XAU/USD"))
 GOLD_STOOQ_SYMBOL = os.environ.get("GOLD_STOOQ_SYMBOL", "xauusd")
 
@@ -102,12 +109,13 @@ GOLD_STOOQ_SYMBOL = os.environ.get("GOLD_STOOQ_SYMBOL", "xauusd")
 # TECH100 quote. The sanity_min/sanity_max check below still guards against
 # it drifting far enough to matter, or against either symbol ever silently
 # starting to fail again.
-ENABLE_TECH100 = _bool("ENABLE_TECH100", True)
-# By user request (24.09): the bot now tracks USA Tech 100 only by default.
-# Gold support is still fully in place (code, tests, email formatting) - set
-# ENABLE_GOLD=true in Render's Environment tab to bring it back alongside
-# Tech100, no code changes needed.
-ENABLE_GOLD = _bool("ENABLE_GOLD", False)
+# По заявка (10.10, "старите са за nasdaq 100" - ботът трябваше да е за
+# злато): дефолтите са обърнати обратно - златото (шампионската стратегия)
+# е включено по подразбиране, Tech100 е изключен. Tech100 поддръжката
+# (стария confluence engine) остава изцяло на мястото си - просто сложи
+# ENABLE_TECH100=true в Render, ако го искаш пак (може и двете едновременно).
+ENABLE_TECH100 = _bool("ENABLE_TECH100", False)
+ENABLE_GOLD = _bool("ENABLE_GOLD", True)
 TECH100_TICKER = os.environ.get("TECH100_TICKER", "NQ=F")
 TECH100_TICKER_FALLBACK = os.environ.get("TECH100_TICKER_FALLBACK", "^NDX")
 TECH100_TWELVEDATA_SYMBOL = os.environ.get("TECH100_TWELVEDATA_SYMBOL", "QQQ")
@@ -116,24 +124,28 @@ TECH100_STOOQ_SYMBOL = os.environ.get("TECH100_STOOQ_SYMBOL", "qqq.us")
 # the user's own screenshot on 18.09 - $29,823.67 CFD vs $718.96 QQQ).
 TECH100_ETF_SCALE = _float("TECH100_ETF_SCALE", 41.5)
 
-# Every instrument the background loop checks each cycle. Set ENABLE_TECH100
-# to false in Render's Environment tab to go back to gold-only.
-# sanity_min/sanity_max are a loose plausibility range (generous on purpose -
-# not a precision check, just "is this even remotely the right instrument
-# and scale") - see _passes_sanity_check() in data_fetch.py.
+# По заявка (10.10): златото вече НЕ минава през стария continuous
+# confluence engine по-долу (INSTRUMENTS/CHECK_INTERVAL_MINUTES) - то си
+# има собствен, отделен checkpoint-базиран цикъл в app.py, управляван от
+# champion_strategy.py (виж CHAMPION_* по-долу). Този речник се гради
+# ВИНАГИ (независимо от ENABLE_GOLD), за да го ползват champion-цикъла и
+# тестовете - ENABLE_GOLD решава само дали app.py СТАРТИРА този цикъл.
+GOLD_INSTRUMENT = {
+    "key": "GOLD",
+    "name": "злато (XAU/USD, GC=F)",
+    "currency": "$",
+    "yahoo_ticker": GOLD_TICKER,
+    "yahoo_fallback": GOLD_TICKER_FALLBACK,
+    "twelvedata_symbol": GOLD_TWELVEDATA_SYMBOL,
+    "stooq_symbol": GOLD_STOOQ_SYMBOL,
+    "sanity_min": _float("GOLD_SANITY_MIN", 800.0),
+    "sanity_max": _float("GOLD_SANITY_MAX", 8000.0),
+}
+
+# Инструменти на стария continuous confluence engine (CHECK_INTERVAL_MINUTES
+# по-долу) - вече само Tech100 (изключен по подразбиране). Златото НЕ е
+# тук - виж GOLD_INSTRUMENT/CHAMPION_* по-горе/долу.
 INSTRUMENTS = []
-if ENABLE_GOLD:
-    INSTRUMENTS.append({
-        "key": "GOLD",
-        "name": "злато (XAU/USD)",
-        "currency": "$",
-        "yahoo_ticker": GOLD_TICKER,
-        "yahoo_fallback": GOLD_TICKER_FALLBACK,
-        "twelvedata_symbol": GOLD_TWELVEDATA_SYMBOL,
-        "stooq_symbol": GOLD_STOOQ_SYMBOL,
-        "sanity_min": _float("GOLD_SANITY_MIN", 800.0),
-        "sanity_max": _float("GOLD_SANITY_MAX", 8000.0),
-    })
 if ENABLE_TECH100:
     INSTRUMENTS.append({
         "key": "TECH100",
@@ -178,6 +190,48 @@ ACTIVE_START_MINUTE = _int("ACTIVE_START_MINUTE", 30)
 ACTIVE_END_HOUR = _int("ACTIVE_END_HOUR", 23)
 ACTIVE_END_MINUTE = _int("ACTIVE_END_MINUTE", 0)
 
+# --- Шампионска стратегия за злато (quiet_accumulation + session_momentum) -
+# намерена и честно валидирана чрез ръчен backtest search (GoldBacktest
+# проект, Рунд 1-9, 32 стратегии тествани с random_baseline контрола и
+# out-of-sample проверка): 72.4% win rate на 29 сигнала, out-of-sample
+# 68.4%->80.0% (не деградира), random baseline ~48-51%. Виж
+# champion_strategy.py за пълната логика и честните уговорки.
+#
+# По твое изрично желание ("искам просто всеки ден да ми праща в 9 в 4 и
+# 30 и в 11 дали е long short... take profit и защо"): проверка и ИМЕЙЛ
+# ВИНАГИ (LONG/SHORT или честно FLAT) точно в тези часове - не continuous
+# скан като Tech100 по-горе. Смени с CHAMPION_CHECKPOINTS=
+# "09:00,16:30,23:00" (24-часов формат, запетая, същата CHAMPION_CHECKPOINTS_TZ).
+def _parse_checkpoints(raw: str):
+    out = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            h, m = part.split(":")
+            out.append((int(h), int(m)))
+        except ValueError:
+            continue
+    return out or [(9, 0), (16, 30), (23, 0)]
+
+
+CHAMPION_CHECKPOINTS = _parse_checkpoints(os.environ.get("CHAMPION_CHECKPOINTS", "09:00,16:30,23:00"))
+CHAMPION_CHECKPOINTS_TZ = os.environ.get("CHAMPION_CHECKPOINTS_TZ", ACTIVE_HOURS_TZ)
+
+# 1:1 ATR risk:reward (Рунд 2 от backtest-а, по твое желание - "не искам tp
+# да е нещо грандиозно"). Промяната тук НЕ преизчислява backtest резултата
+# по-горе - те са валидирани точно с 1.5/1.5, не променяй без нов backtest.
+CHAMPION_STOP_ATR_MULT = _float("CHAMPION_STOP_ATR_MULT", 1.5)
+CHAMPION_TP_ATR_MULT = _float("CHAMPION_TP_ATR_MULT", 1.5)
+
+# Шампионската стратегия е валидирана точно на 1-часови (GC=F) свещи - не
+# сменяй това, без да пуснеш нов backtest на новия timeframe. Периодът на
+# изтегляне (60 дни) дава ~1000+ часови свещи - достатъчно за 100-свещния
+# ATR прозорец на quiet_accumulation плюс буфер история.
+GOLD_CANDLE_INTERVAL = os.environ.get("GOLD_CANDLE_INTERVAL", "60m")
+GOLD_FETCH_PERIOD = os.environ.get("GOLD_FETCH_PERIOD", "60d")
+
 # --- Confluence strategy -----------------------------------------------------
 # Number of the 7 confluence conditions (see signals.py, candlesticks.py,
 # analog_matcher.py) that must agree before an alert is sent. Higher =
@@ -208,6 +262,25 @@ ANALOG_SHAPE_CANDLES = _int("ANALOG_SHAPE_CANDLES", 10)
 ANALOG_LOOKBACK_CANDLES = _int("ANALOG_LOOKBACK_CANDLES", 192)
 ANALOG_FOLLOW_CANDLES = _int("ANALOG_FOLLOW_CANDLES", 8)
 ANALOG_MAX_DISTANCE = _float("ANALOG_MAX_DISTANCE", 0.18)
+
+# By user request (25.09 - "искам наистина да гледа графиката от предните
+# 1-2 дена и по-реалистични take profit-и"): take-profit/stop-loss should
+# reflect what ACTUALLY happened after a similar recent setup far more
+# often than they currently do. ANALOG_MAX_DISTANCE above is deliberately
+# strict (see its comment) because it also gates the 7th CONFLUENCE VOTE -
+# a shaky match shouldn't be able to help trigger a BUY/SELL email on its
+# own. But that strictness was tested (simulated on realistic-noise 15m
+# data) to only produce a "confident" match on ~9% of checks - so 91% of
+# the time, TP/SL was silently falling back to the generic ATR multiple
+# below instead of the real-history-based sizing this feature exists for.
+# This separate, looser threshold is used ONLY for sizing, never for the
+# confluence vote - a so-so shape match is still useful for "roughly how
+# far did this kind of move tend to run", even when it's not solid enough
+# to trust as a signal on its own. Loosening only this (not
+# ANALOG_MAX_DISTANCE) means TP/SL now reflects a real recent analog on
+# roughly a quarter of checks instead of ~1 in 11, without changing which
+# checks actually trigger a BUY/SELL email.
+ANALOG_SIZING_MAX_DISTANCE = _float("ANALOG_SIZING_MAX_DISTANCE", 0.35)
 
 # By user request (18.09): only email BUY signals, never SELL - later
 # reverted (24.09): with BUY-only, the inbox always looks the same

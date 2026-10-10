@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify
 
+import champion_strategy
 import config
 import data_fetch
 import notifier
@@ -29,7 +30,8 @@ log = logging.getLogger("gold_signal_bot")
 app = Flask(__name__)
 
 # One state block per configured instrument (config.INSTRUMENTS), keyed by
-# instrument "key" (e.g. "GOLD", "TECH100").
+# instrument "key" (e.g. "TECH100" - gold no longer runs through this old
+# continuous confluence engine, see "champion" state block below).
 state = {
     "started_at": datetime.now(timezone.utc).isoformat(),
     "instruments": {
@@ -45,6 +47,22 @@ state = {
             "last_data_source": None,  # which provider actually served the last successful check - see data_fetch.get_candles
         }
         for inst in config.INSTRUMENTS
+    },
+    # По заявка (10.10): златото вече не е в "instruments" по-горе - то има
+    # собствен checkpoint-базиран цикъл (champion_strategy.py), а не
+    # continuous confluence скан. Виж check_champion_gold()/background_loop_champion()
+    # по-долу.
+    "champion": {
+        "name": config.GOLD_INSTRUMENT["name"],
+        "enabled": config.ENABLE_GOLD,
+        "checkpoints": [f"{h:02d}:{m:02d}" for h, m in config.CHAMPION_CHECKPOINTS],
+        "checkpoints_tz": config.CHAMPION_CHECKPOINTS_TZ,
+        "last_check": None,
+        "last_price": None,
+        "last_direction": "NONE",
+        "last_data_source": None,
+        "consecutive_errors": 0,
+        "last_error": None,
     },
 }
 
@@ -146,6 +164,76 @@ def check_instrument(instrument: dict):
             notifier.send_error_email(key, str(exc))
 
 
+def check_champion_gold():
+    """Една checkpoint проверка на шампионската стратегия за злато - вика
+    се точно на часовете в config.CHAMPION_CHECKPOINTS (09:00/16:30/23:00
+    Europe/Sofia по подразбиране), не на continuous timer. Изпраща имейл
+    ВИНАГИ - LONG/SHORT или честно FLAT - по изрична заявка на потребителя
+    да получава отговор на всяка от тези 3 проверки."""
+    cs = state["champion"]
+    try:
+        source_info = {}
+        df = data_fetch.get_candles(
+            config.GOLD_INSTRUMENT, interval=config.GOLD_CANDLE_INTERVAL,
+            period=config.GOLD_FETCH_PERIOD, source_info=source_info,
+        )
+        result = champion_strategy.evaluate(df)
+
+        cs["last_check"] = datetime.now(timezone.utc).isoformat()
+        cs["last_price"] = result.price
+        cs["last_direction"] = result.direction
+        cs["last_data_source"] = source_info.get("source")
+        cs["consecutive_errors"] = 0
+        cs["last_error"] = None
+
+        log.info(
+            "[GOLD/champion] Checkpoint complete: price=%.2f direction=%s quiet=%s momentum=%s",
+            result.price, result.direction, result.quiet_vote, result.momentum_vote,
+        )
+
+        if result.direction in ("LONG", "SHORT"):
+            notifier.send_champion_signal_email(result)
+        else:
+            notifier.send_champion_flat_email(result)
+
+    except Exception as exc:  # noqa: BLE001
+        cs["consecutive_errors"] += 1
+        cs["last_error"] = str(exc)
+        log.exception("[GOLD/champion] Checkpoint check failed")
+        if cs["consecutive_errors"] == 5:
+            notifier.send_error_email("GOLD", str(exc))
+
+
+def _next_champion_checkpoint() -> tuple:
+    """Връща (datetime на следващия checkpoint, секунди до него)."""
+    try:
+        tz = ZoneInfo(config.CHAMPION_CHECKPOINTS_TZ)
+    except Exception:
+        log.warning("CHAMPION_CHECKPOINTS_TZ (%s) invalid - using UTC.", config.CHAMPION_CHECKPOINTS_TZ)
+        tz = timezone.utc
+    now_local = datetime.now(tz)
+    candidates = []
+    for h, m in config.CHAMPION_CHECKPOINTS:
+        candidate = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+        if candidate <= now_local:
+            candidate += timedelta(days=1)
+        candidates.append(candidate)
+    next_dt = min(candidates)
+    return next_dt, max(1.0, (next_dt - now_local).total_seconds())
+
+
+def background_loop_champion():
+    """Отделен, checkpoint-базиран цикъл за златото - спи до следващия от
+    config.CHAMPION_CHECKPOINTS, прави проверка, спи до следващия, и т.н.
+    Независим от стария CHECK_INTERVAL_MINUTES continuous скан по-долу
+    (background_loop(), за Tech100/стария confluence engine)."""
+    while True:
+        next_dt, seconds = _next_champion_checkpoint()
+        log.info("[GOLD/champion] Следващ checkpoint: %s (след %.0f мин)", next_dt.isoformat(), seconds / 60)
+        time.sleep(seconds)
+        check_champion_gold()
+
+
 def check_once():
     if not _within_active_window():
         log.info(
@@ -160,8 +248,22 @@ def check_once():
 
 
 def background_loop():
-    if config.SEND_TEST_EMAIL_ON_START:
-        notifier.send_test_email()
+    # By user request (25.09, after "всеки път когато се пусне ми изпраща
+    # съобщение бай"): a restart used to trigger an INSTANT check_once()
+    # with a freshly wiped cooldown (state only lives in memory, so a new
+    # process has no idea a signal was already emailed minutes ago). While
+    # the cron-job.org keepalive was disabled earlier today, the service
+    # kept restarting every ~15 min - each restart re-ran check_once()
+    # immediately with zero cooldown protection, which is exactly what
+    # made it look like "every single time it starts, I get a BUY email".
+    # That root cause is fixed now (keepalive re-enabled), but waiting one
+    # full interval before the very first check is a cheap safety net
+    # against the same symptom if the service ever restarts again for any
+    # other reason (a manual deploy, a brief Render hiccup, ...) - worst
+    # case it costs one delayed check, not a burst of un-cooled-down
+    # alerts. Hit /check-now any time to trigger an immediate check
+    # manually instead of waiting.
+    time.sleep(max(60, config.CHECK_INTERVAL_MINUTES * 60))
     while True:
         check_once()
         time.sleep(max(60, config.CHECK_INTERVAL_MINUTES * 60))
@@ -181,22 +283,34 @@ def health():
 def _check_all_instruments_now():
     """Same as check_once() but ignores the active window - a manual
     /check-now hit is an explicit request to test right now, weekend or
-    3am included."""
+    3am included. Also triggers an immediate champion-strategy gold
+    checkpoint, regardless of its normal schedule."""
     for instrument in config.INSTRUMENTS:
         check_instrument(instrument)
+    if config.ENABLE_GOLD:
+        check_champion_gold()
 
 
 @app.route("/check-now")
 def check_now():
-    """Manually trigger an immediate check of every instrument, regardless
-    of the active window (useful for testing after deploy, any time)."""
+    """Manually trigger an immediate check of every instrument (+ gold's
+    champion strategy, if enabled), regardless of the active window/next
+    scheduled checkpoint (useful for testing after deploy, any time)."""
     threading.Thread(target=_check_all_instruments_now, daemon=True).start()
     return jsonify({"status": "check triggered, see /"})
 
 
 def start_background_thread():
-    t = threading.Thread(target=background_loop, daemon=True)
-    t.start()
+    if config.SEND_TEST_EMAIL_ON_START:
+        notifier.send_test_email()
+    # По заявка (10.10): два независими фонови цикъла - стария continuous
+    # confluence скан (Tech100, ако е включен) и новия checkpoint-базиран
+    # цикъл за златото (шампионската стратегия). Всеки старира само ако
+    # реално има какво да проверява.
+    if config.INSTRUMENTS:
+        threading.Thread(target=background_loop, daemon=True).start()
+    if config.ENABLE_GOLD:
+        threading.Thread(target=background_loop_champion, daemon=True).start()
 
 
 start_background_thread()
