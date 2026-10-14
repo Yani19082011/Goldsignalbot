@@ -166,10 +166,11 @@ def check_instrument(instrument: dict):
 
 def check_champion_gold():
     """Една checkpoint проверка на шампионската стратегия за злато - вика
-    се точно на часовете в config.CHAMPION_CHECKPOINTS (09:00/16:30/23:00
-    Europe/Sofia по подразбиране), не на continuous timer. Изпраща имейл
-    ВИНАГИ - LONG/SHORT или честно FLAT - по изрична заявка на потребителя
-    да получава отговор на всяка от тези 3 проверки."""
+    се точно на часовете в config.CHAMPION_CHECKPOINTS (09:00 Europe/Sofia
+    по подразбиране - единственият час, на който quiet_accumulation+
+    ema_trend е честно валидирана, виж champion_strategy.py), не на
+    continuous timer. Изпраща имейл ВИНАГИ - LONG/SHORT или честно FLAT -
+    по изрична заявка на потребителя да получава отговор на всяка проверка."""
     cs = state["champion"]
     try:
         source_info = {}
@@ -187,8 +188,8 @@ def check_champion_gold():
         cs["last_error"] = None
 
         log.info(
-            "[GOLD/champion] Checkpoint complete: price=%.2f direction=%s quiet=%s momentum=%s",
-            result.price, result.direction, result.quiet_vote, result.momentum_vote,
+            "[GOLD/champion] Checkpoint complete: price=%.2f direction=%s quiet=%s trend=%s",
+            result.price, result.direction, result.quiet_vote, result.trend_vote,
         )
 
         if result.direction in ("LONG", "SHORT"):

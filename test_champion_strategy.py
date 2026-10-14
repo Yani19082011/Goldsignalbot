@@ -1,19 +1,25 @@
 """
 Offline sanity tests for the champion gold strategy (champion_strategy.py:
-quiet_accumulation + session_momentum), using synthetic price paths (no
-network needed). Run with: python3 test_champion_strategy.py
+quiet_accumulation + ema_trend), using synthetic price paths (no network
+needed). Run with: python3 test_champion_strategy.py
 
 Mirrors the style of test_signals.py - these check the live-bot porting of
 the logic is faithful to the validated backtest (same math, same no-
 lookahead discipline), not the backtest's real-market results themselves
-(those were produced separately in GoldBacktest/gold_strategy_backtest.py).
+(those were produced separately in GoldBacktest/gold_hour_structure_search.py
++ gold_quiet_accumulation_deepdive.py + gold_combo_oos_check.py).
 
 Price paths use a FIXED high/low "band" around Close (not realistic
 candle shapes) so True Range - and therefore ATR - stays exactly at a
 known floor (2x the band) as long as each bar's Close delta stays within
 the band. That makes it possible to deliberately engineer a quiet-ATR
-regime with a controlled drift/momentum on top, instead of hoping random
-noise happens to produce one.
+regime with a controlled drift on top, instead of hoping random noise
+happens to produce one.
+
+Unlike the old session_momentum (which only looked at the last 3 bars),
+ema_trend needs an ESTABLISHED trend (EMA9/EMA21/EMA50 aligned) - so the
+"agree" scenarios below use a long, steady drift (150 bars), not just a
+short tail jump.
 """
 import numpy as np
 import pandas as pd
@@ -41,69 +47,69 @@ def _quiet_base(n_quiet: int = 130, seed: int = 0):
     return list(2000 + np.cumsum(rng.normal(0, 0.1, n_quiet)))
 
 
-def _quiet_then_grind(step_per_bar: float, n_quiet: int = 130, seed: int = 0):
-    """n_quiet тихи свещи, последвани от QUIET_DRIFT_LOOKBACK (=5) свещи,
-    всяка стъпваща с `step_per_bar` - в рамките на band-а, затова ATR си
-    остава на пода (не се "раздува"), докато кумулативният дрифт за
-    последните 5 свещи И движението за последните 3 свещи растат заедно
-    (реалистично за грайндащ, но тих пазар). И двете под-стратегии трябва
-    да се задействат в същата посока тук."""
+def _quiet_then_established_trend(step_per_bar: float, n_quiet: int = 130, n_trend: int = 150, seed: int = 0):
+    """n_quiet тихи свещи, последвани от n_trend свещи с постоянна стъпка
+    `step_per_bar` (в рамките на band-а, затова ATR си остава на пода, не
+    се "раздува"). Достатъчно дълго (150 бара), за да може EMA9/EMA21/EMA50
+    реално да се подредят в посоката на тренда (ema_trend не гледа само
+    последните няколко бара, за разлика от старата session_momentum) - и
+    докато кумулативният 5-барен дрифт в края остава извън "мъртвата зона"
+    на quiet_accumulation. И двете под-стратегии трябва да се задействат в
+    същата посока тук."""
     quiet = _quiet_base(n_quiet, seed)
     base = quiet[-1]
-    drift_bars = [base + step_per_bar * (k + 1) for k in range(champion_strategy.QUIET_DRIFT_LOOKBACK)]
-    return quiet + drift_bars
+    trend = [base + step_per_bar * (k + 1) for k in range(n_trend)]
+    return quiet + trend
 
 
-def test_quiet_market_plus_momentum_jump_agree_on_long():
-    closes = _quiet_then_grind(step_per_bar=2.0)
+def test_quiet_market_plus_established_trend_agree_on_long():
+    closes = _quiet_then_established_trend(step_per_bar=0.5)
     df = make_series(closes)
     result = champion_strategy.evaluate(df)
-    print(f"[long-agree] direction={result.direction} quiet={result.quiet_vote} momentum={result.momentum_vote} "
+    print(f"[long-agree] direction={result.direction} quiet={result.quiet_vote} trend={result.trend_vote} "
           f"price={result.price:.2f} atr={result.atr:.3f} reasons={result.reasons}")
     assert result.quiet_vote == "LONG", "expected quiet_accumulation to vote LONG in a quiet-then-grind-up setup"
-    assert result.momentum_vote == "LONG", "expected session_momentum to vote LONG after the grind-up"
+    assert result.trend_vote == "LONG", "expected ema_trend to vote LONG after the established grind-up"
     assert result.direction == "LONG"
     assert result.stop_loss < result.price < result.take_profit
 
 
-def test_quiet_market_plus_momentum_jump_agree_on_short():
-    closes = _quiet_then_grind(step_per_bar=-2.0)
+def test_quiet_market_plus_established_trend_agree_on_short():
+    closes = _quiet_then_established_trend(step_per_bar=-0.5)
     df = make_series(closes)
     result = champion_strategy.evaluate(df)
-    print(f"[short-agree] direction={result.direction} quiet={result.quiet_vote} momentum={result.momentum_vote} "
+    print(f"[short-agree] direction={result.direction} quiet={result.quiet_vote} trend={result.trend_vote} "
           f"price={result.price:.2f} atr={result.atr:.3f}")
     assert result.quiet_vote == "SHORT"
-    assert result.momentum_vote == "SHORT"
+    assert result.trend_vote == "SHORT"
     assert result.direction == "SHORT"
     assert result.take_profit < result.price < result.stop_loss
 
 
 def test_one_substrategy_abstaining_is_flat_not_forced():
-    # Последните 2 "свободни" свещи от 5-барния прозорец се качват точно
-    # толкова, че да приберат нетния 5-барен дрифт обратно в "мъртвата
-    # зона" (под QUIET_DRIFT_THRESHOLD) - quiet_accumulation се въздържа
-    # (None) - докато последните 3 свещи все пак падат достатъчно рязко, за
-    # да задействат session_momentum (SHORT). Резултатът НЕ бива да бъде
-    # форсиран към SHORT само защото едната под-стратегия има мнение.
-    quiet = _quiet_base(seed=1)
-    base = quiet[-1]
-    rise, fall = 3.0, 2.0
-    tail = [base + rise, base + rise, base + rise - fall, base + rise - 2 * fall, base + rise - 3 * fall]
-    df = make_series(quiet + tail)
+    # Установен LONG тренд (достатъчно дълъг, за да подреди EMA9>EMA21 и
+    # цена>EMA50), но последните 5 свещи са напълно плоски - нетният
+    # 5-барен дрифт пада в "мъртвата зона" на quiet_accumulation (None),
+    # докато ema_trend все още гледа установената по-дълга структура и
+    # остава LONG. Резултатът НЕ бива да бъде форсиран към LONG само защото
+    # едната под-стратегия има мнение.
+    closes = _quiet_then_established_trend(step_per_bar=0.5, n_trend=145)
+    flat_tail = [closes[-1]] * 5
+    df = make_series(closes + flat_tail)
     result = champion_strategy.evaluate(df)
-    print(f"[abstain] direction={result.direction} quiet={result.quiet_vote} momentum={result.momentum_vote}")
+    print(f"[abstain] direction={result.direction} quiet={result.quiet_vote} trend={result.trend_vote}")
     assert result.quiet_vote is None, "expected quiet_accumulation to abstain (drift inside the dead zone)"
-    assert result.momentum_vote == "SHORT", "expected session_momentum to still fire on the sharp last-3-bar drop"
+    assert result.trend_vote == "LONG", "expected ema_trend to still reflect the established uptrend"
     assert result.direction == "FLAT", "one side abstaining must not force the other side's direction"
     assert result.stop_loss is None and result.take_profit is None
 
 
 def test_noisy_market_with_no_setup_is_flat():
     rng = np.random.default_rng(2)
-    closes = 2000 + np.cumsum(rng.normal(0, 0.8, 150))  # нормална волатилност, без ясен тих период/скок
+    closes = 2000 + np.cumsum(rng.normal(0, 0.8, 150))  # нормална волатилност, без установен тих период/тренд
     df = make_series(list(closes))
     result = champion_strategy.evaluate(df)
-    print(f"[noisy] direction={result.direction} quiet={result.quiet_vote} momentum={result.momentum_vote}")
+    print(f"[noisy] direction={result.direction} quiet={result.quiet_vote} trend={result.trend_vote}")
     assert result.direction == "FLAT"
 
 
@@ -120,7 +126,7 @@ def test_no_lookahead_last_row_decides_everything():
     # Две идентични истории до позиция i, различни само СЛЕД i - резултатът
     # на evaluate() (който винаги гледа последния ред) трябва да зависи
     # единствено от данните ДО и ВКЛЮЧИТЕЛНО последния ред, никога от бъдещето.
-    closes = _quiet_then_grind(step_per_bar=2.0)
+    closes = _quiet_then_established_trend(step_per_bar=0.5)
     df_a = make_series(closes)
     df_b = make_series(closes + [9999.0, -9999.0, 5.0])  # бъдещи редове, различни стойности
     df_b_truncated = df_b.iloc[:len(df_a)]
@@ -132,7 +138,7 @@ def test_no_lookahead_last_row_decides_everything():
 
 
 def test_stop_loss_take_profit_use_configured_atr_multiples():
-    closes = _quiet_then_grind(step_per_bar=2.0)
+    closes = _quiet_then_established_trend(step_per_bar=0.5)
     df = make_series(closes)
     result = champion_strategy.evaluate(df)
     expected_stop = round(result.price - config.CHAMPION_STOP_ATR_MULT * result.atr, 2)
@@ -142,15 +148,25 @@ def test_stop_loss_take_profit_use_configured_atr_multiples():
     assert result.take_profit == expected_tp
 
 
+def test_tp_sl_distance_matches_price_difference():
+    closes = _quiet_then_established_trend(step_per_bar=0.5)
+    df = make_series(closes)
+    result = champion_strategy.evaluate(df)
+    assert result.tp_sl_distance == round(abs(result.take_profit - result.price), 2)
+    assert result.tp_sl_distance_pct == round(result.tp_sl_distance / result.price * 100, 2)
+    print(f"[tp-sl-distance] distance={result.tp_sl_distance} pct={result.tp_sl_distance_pct}%")
+
+
 if __name__ == "__main__":
     tests = [
-        test_quiet_market_plus_momentum_jump_agree_on_long,
-        test_quiet_market_plus_momentum_jump_agree_on_short,
+        test_quiet_market_plus_established_trend_agree_on_long,
+        test_quiet_market_plus_established_trend_agree_on_short,
         test_one_substrategy_abstaining_is_flat_not_forced,
         test_noisy_market_with_no_setup_is_flat,
         test_insufficient_data_is_safe_and_honest,
         test_no_lookahead_last_row_decides_everything,
         test_stop_loss_take_profit_use_configured_atr_multiples,
+        test_tp_sl_distance_matches_price_difference,
     ]
     failures = 0
     for t in tests:

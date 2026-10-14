@@ -64,13 +64,15 @@ ALLOW_DAILY_FALLBACK = _bool("ALLOW_DAILY_FALLBACK", False)
 # timing out back-to-back) to roughly 4x this value.
 FETCH_TIMEOUT_SECONDS = _int("FETCH_TIMEOUT_SECONDS", 8)
 
-# По заявка (10.10): GC=F (COMEX gold futures) е тикерът, върху който
-# шампионската стратегия (quiet_accumulation+session_momentum, виж
-# champion_strategy.py) беше честно backtest-вана и валидирана (72.4% win
-# rate, 29 сигнала, out-of-sample 68.4%->80.0%) - затова е primary сега,
-# не fallback. XAUUSD=X (спот форекс-стил тикер) е различен инструмент с
-# различни часове на търговия и форма на свещите, затова е само резервен
-# вариант, ако GC=F временно не отговори.
+# По заявка (10.10, обновено 13.10): GC=F (COMEX gold futures) е тикерът,
+# върху който шампионската стратегия (quiet_accumulation+ema_trend, виж
+# champion_strategy.py) беше честно backtest-вана и валидирана (63.3% win
+# rate на 123 сигнала, пълна ~880-дневна история; out-of-sample 62.9%->
+# 64.9%; 4 непресичащи се тримесечия 53.8%/69.4%/63.6%/66.7% - нито едно
+# под 50%) - затова е primary сега, не fallback. XAUUSD=X (спот
+# форекс-стил тикер) е различен инструмент с различни часове на търговия и
+# форма на свещите, затова е само резервен вариант, ако GC=F временно не
+# отговори.
 GOLD_TICKER = os.environ.get("GOLD_TICKER", "GC=F")
 GOLD_TICKER_FALLBACK = os.environ.get("GOLD_TICKER_FALLBACK", "XAUUSD=X")
 GOLD_TWELVEDATA_SYMBOL = os.environ.get("TWELVEDATA_SYMBOL", os.environ.get("GOLD_TWELVEDATA_SYMBOL", "XAU/USD"))
@@ -190,18 +192,21 @@ ACTIVE_START_MINUTE = _int("ACTIVE_START_MINUTE", 30)
 ACTIVE_END_HOUR = _int("ACTIVE_END_HOUR", 23)
 ACTIVE_END_MINUTE = _int("ACTIVE_END_MINUTE", 0)
 
-# --- Шампионска стратегия за злато (quiet_accumulation + session_momentum) -
-# намерена и честно валидирана чрез ръчен backtest search (GoldBacktest
-# проект, Рунд 1-9, 32 стратегии тествани с random_baseline контрола и
-# out-of-sample проверка): 72.4% win rate на 29 сигнала, out-of-sample
-# 68.4%->80.0% (не деградира), random baseline ~48-51%. Виж
-# champion_strategy.py за пълната логика и честните уговорки.
+# --- Шампионска стратегия за злато (quiet_accumulation + ema_trend) ---------
+# намерена и честно валидирана чрез разширен backtest search (GoldBacktest
+# проект - gold_hour_structure_search.py/gold_quiet_accumulation_deepdive.py/
+# gold_combo_oos_check.py, 47 стратегии + комбинации, тествани на ВСИЧКИ 24
+# часа на денонощието): 63.3% win rate на 123 сигнала (пълна ~880-дневна
+# история), out-of-sample 62.9%->64.9% (не деградира), 4 непресичащи се
+# тримесечия 53.8%/69.4%/63.6%/66.7% (нито едно под 50%), random baseline
+# ~47.4%. Виж champion_strategy.py за пълната логика и честните уговорки.
 #
-# По твое изрично желание ("искам просто всеки ден да ми праща в 9 в 4 и
-# 30 и в 11 дали е long short... take profit и защо"): проверка и ИМЕЙЛ
-# ВИНАГИ (LONG/SHORT или честно FLAT) точно в тези часове - не continuous
-# скан като Tech100 по-горе. Смени с CHAMPION_CHECKPOINTS=
-# "09:00,16:30,23:00" (24-часов формат, запетая, същата CHAMPION_CHECKPOINTS_TZ).
+# ВАЖНО: валидирано е САМО с проверка в 09:00 Europe/Sofia (24-часов TP/SL
+# хоризонт) - други часове бяха тествани отделно и се представят различно,
+# затова checkpoint-ът по подразбиране сега е само този ЕДИН час на ден
+# (преди - 09:00/16:30/23:00, за старата quiet_accumulation+session_momentum
+# комбинация). Смени CHAMPION_CHECKPOINTS, ако искаш да добавиш други часове,
+# но имай предвид, че само 09:00 е честно backtest-ван с тази комбинация.
 def _parse_checkpoints(raw: str):
     out = []
     for part in raw.split(","):
@@ -213,10 +218,10 @@ def _parse_checkpoints(raw: str):
             out.append((int(h), int(m)))
         except ValueError:
             continue
-    return out or [(9, 0), (16, 30), (23, 0)]
+    return out or [(9, 0)]
 
 
-CHAMPION_CHECKPOINTS = _parse_checkpoints(os.environ.get("CHAMPION_CHECKPOINTS", "09:00,16:30,23:00"))
+CHAMPION_CHECKPOINTS = _parse_checkpoints(os.environ.get("CHAMPION_CHECKPOINTS", "09:00"))
 CHAMPION_CHECKPOINTS_TZ = os.environ.get("CHAMPION_CHECKPOINTS_TZ", ACTIVE_HOURS_TZ)
 
 # 1:1 ATR risk:reward (Рунд 2 от backtest-а, по твое желание - "не искам tp

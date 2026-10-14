@@ -104,7 +104,7 @@ def send_signal_email(result, instrument: dict) -> bool:
 def send_champion_signal_email(result, instrument_name: str = None) -> bool:
     """Имейл при LONG/SHORT сигнал от шампионската стратегия (виж
     champion_strategy.py) - изпраща се на всеки checkpoint, когато
-    quiet_accumulation и session_momentum се съгласят."""
+    quiet_accumulation и ema_trend се съгласят."""
     instrument_name = instrument_name or config.GOLD_INSTRUMENT["name"]
     is_long = result.direction == "LONG"
     emoji = "🟢" if is_long else "🔴"
@@ -113,27 +113,30 @@ def send_champion_signal_email(result, instrument_name: str = None) -> bool:
     action_text = "LONG (покупка)" if is_long else "SHORT (продажба)"
 
     reasons_html = "".join(f"<li>{r}</li>" for r in result.reasons)
+    dist, dist_pct = result.tp_sl_distance, result.tp_sl_distance_pct
 
     subject = f"{emoji} Шампионска стратегия: {action_text} - {instrument_name} @ ${result.price:,.2f}"
     html = f"""
     <div style="font-family: -apple-system, Arial, sans-serif; max-width: 560px; margin: 0 auto;">
       <div style="background:{action_bg}; color:{action_color}; padding:16px 20px; border-radius:10px 10px 0 0;">
         <h2 style="margin:0; font-size:20px;">{emoji} {instrument_name}: {action_text}</h2>
-        <p style="margin:4px 0 0; font-size:14px;">quiet_accumulation + session_momentum са съгласни</p>
+        <p style="margin:4px 0 0; font-size:14px;">quiet_accumulation + ema_trend са съгласни</p>
       </div>
       <div style="border:1px solid #eee; border-top:none; padding:20px; border-radius:0 0 10px 10px;">
         <table style="width:100%; border-collapse:collapse; font-size:14px; margin-bottom:16px;">
           <tr><td style="padding:4px 0; color:#666;">Цена (вход)</td><td style="text-align:right; font-weight:600;">${result.price:,.2f}</td></tr>
           <tr><td style="padding:4px 0; color:#666;">Stop-Loss</td><td style="text-align:right;">${result.stop_loss:,.2f}</td></tr>
           <tr><td style="padding:4px 0; color:#666;">Take-Profit</td><td style="text-align:right;">${result.take_profit:,.2f}</td></tr>
+          <tr><td style="padding:4px 0; color:#666;">Разстояние TP/SL (прибл.)</td><td style="text-align:right;">±${dist:,.2f} (~{dist_pct:.2f}%)</td></tr>
           <tr><td style="padding:4px 0; color:#666;">Час на свещта</td><td style="text-align:right;">{result.timestamp}</td></tr>
         </table>
         <p style="font-size:14px; color:#333; margin-bottom:6px;"><strong>Защо:</strong></p>
         <ul style="font-size:13px; color:#444; margin-top:0; padding-left:18px;">{reasons_html}</ul>
         <p style="font-size:11px; color:#999; margin-top:18px; border-top:1px solid #eee; padding-top:10px;">
-          Честен backtest (GC=F, 1h свещи, 09:00/16:30/23:00 Europe/Sofia checkpoint-и, 1:1 ATR R:R, ~2 години история):
+          Честен backtest (GC=F, 1h свещи, проверка в {champion_strategy.BACKTEST_CHECKPOINT}, 1:1 ATR R:R, ~880 дни история):
           {champion_strategy.BACKTEST_WIN_RATE_PCT}% win rate на {champion_strategy.BACKTEST_SIGNALS} сигнала,
-          out-of-sample {champion_strategy.BACKTEST_OOS_OLDER_PCT}% -> {champion_strategy.BACKTEST_OOS_NEWER_PCT}%
+          out-of-sample {champion_strategy.BACKTEST_OOS_OLDER_PCT}% -> {champion_strategy.BACKTEST_OOS_NEWER_PCT}%,
+          4 отделни тримесечия {champion_strategy.BACKTEST_QUARTER_MIN_PCT}%-{champion_strategy.BACKTEST_QUARTER_MAX_PCT}%
           (random baseline ~{champion_strategy.BACKTEST_RANDOM_BASELINE_PCT}%). Това НЕ е гаранция за бъдещето -
           пазарът може да промени режим по всяко време, а новини (лихви, геополитика, макро данни) не се виждат
           в тези индикатори. Провери сам преди да отвориш позиция - не е финансов съвет.
@@ -163,9 +166,9 @@ def send_champion_flat_email(result, instrument_name: str = None) -> bool:
         <ul style="font-size:13px; color:#444; margin-top:0; padding-left:18px;">{reasons_html}</ul>
         <p style="font-size:11px; color:#999; margin-top:18px; border-top:1px solid #eee; padding-top:10px;">
           По-добре честно FLAT, отколкото форсирана LONG/SHORT догадка само за да има какво да пише в имейла -
-          шампионската стратегия (quiet_accumulation+session_momentum) е валидирана само за моментите, в които
-          двете под-стратегии реално се съгласят ({champion_strategy.BACKTEST_SIGNALS} от хиляди проверки в
-          backtest-а). Следващата проверка е на следващия checkpoint.
+          шампионската стратегия (quiet_accumulation+ema_trend) е валидирана само за моментите, в които
+          двете под-стратегии реално се съгласят ({champion_strategy.BACKTEST_SIGNALS} сигнала в честния
+          backtest, проверка в {champion_strategy.BACKTEST_CHECKPOINT}). Следващата проверка е на следващия checkpoint.
         </p>
       </div>
     </div>
